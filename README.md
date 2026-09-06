@@ -151,12 +151,17 @@ pnpm install
 
 > 💡 **提示**：Rust 依赖（`src-tauri/Cargo.toml` 中定义的 crates）会在首次执行编译或调试命令时由 Cargo 自动联网下载并缓存，无需手动拉取。
 
----
-
-## 生成程序的图标
+### 生成程序的图标
 
 ```bash
 pnpm tauri icon
+```
+
+### Error Found version mismatched Tauri packages.
+
+```bash
+cd src-tauri
+cargo update -p tauri
 ```
 
 > 该命令只需运行一次
