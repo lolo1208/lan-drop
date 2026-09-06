@@ -1,0 +1,49 @@
+[package]
+name = "lan-drop"
+version = "2.0.0"
+description = "LAN Drop (内网投送) - 基于 Tauri v2 + Rust + React 的轻量级 P2P 局域网极速文件传输与即时投送工具"
+edition = "2021"
+
+[dependencies]
+# Tauri v2 核心框架
+tauri = { version = "2.0.0", features = ["tray-icon"] }
+tauri-plugin-shell = "2.0.0"
+tauri-plugin-dialog = "2.0.0"
+tauri-plugin-fs = "2.0.0"
+
+# Tokio 异步运行时与异步 I/O 流
+tokio = { version = "1.38", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+async-stream = "0.3"
+
+# 内置轻量级 Axum 异步 HTTP 服务 (用于流式接收与即时通信)
+axum = { version = "0.7", features = ["multipart", "tokio"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Reqwest 极速流式客户端 (实现磁盘直推至对端 Axum)
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "json"] }
+
+# UDP 组播与底层 Socket 配置 (SO_REUSEADDR, 组播加入等)
+socket2 = { version = "0.5", features = ["all"] }
+local-ip-address = "0.6"
+whoami = "1.5"
+
+# 序列化与数据格式
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bytes = "1.0"
+uuid = { version = "1.8", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+urlencoding = "2.1"
+dirs = "5.0"
+
+# 本地 SQLite 持久化 (传输与聊天记录)
+rusqlite = { version = "0.31", features = ["bundled"] }
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
