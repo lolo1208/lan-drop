@@ -61,17 +61,19 @@ export function App() {
   const [folderToast, setFolderToast] = useState<string | null>(null);
   const [highlightMessageId, setHighlightMessageId] = useState<string | null>(null);
 
-  // 媒体大图/视频预览弹窗
+  // 媒体大图/视频/音频预览弹窗
   const [lightbox, setLightbox] = useState<{
     isOpen: boolean;
-    type: 'image' | 'video';
+    type: 'image' | 'video' | 'audio';
     url: string;
     fileName: string;
+    filePath?: string;
   }>({
     isOpen: false,
     type: 'image',
     url: '',
     fileName: '',
+    filePath: undefined,
   });
 
   // 1. 初始化 IPC 监听与配置读取
@@ -125,7 +127,29 @@ export function App() {
     });
 
     storageService.getAllTransfers().then((list) => setTransfers(list));
-    storageService.getAllChats().then((list) => setAllChats(deduplicateMessages(list)));
+    storageService.getAllChats().then(async (list) => {
+      const deduped = deduplicateMessages(list);
+      setAllChats(deduped);
+      // 应用冷启动时，针对中断的传输任务精确校对本地已落盘的部分临时文件大小
+      if (isTauri()) {
+        for (const m of deduped) {
+          if (m.fileAttachment && (m.fileAttachment.state === 'failed' || m.fileAttachment.state === 'transferring')) {
+            try {
+              const diskSize = await ipc.getPartialFileSize(m.fileAttachment.name);
+              if (diskSize > 0 && diskSize < m.fileAttachment.size) {
+                m.fileAttachment.state = 'failed';
+                m.fileAttachment.transferredBytes = diskSize;
+                m.fileAttachment.progress = Number(((diskSize / m.fileAttachment.size) * 100).toFixed(1));
+                setAllChats((prev) => upsertMessage(prev, m));
+                storageService.saveChatMessage(m).catch(() => {});
+              }
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+    });
 
     // 监听本地配置实时更新
     const unsubConfig = ipc.on<LocalDeviceConfig>('config://updated', (updatedConfig) => {
@@ -232,7 +256,7 @@ export function App() {
           const next = [...prev];
           const target = { ...next[idx] };
           if (target.fileAttachment) {
-            const progress = Math.min(99, Math.round((data.transferred / data.total) * 100));
+            const progress = Math.min(99.9, Number(((data.transferred / data.total) * 100).toFixed(1)));
             target.fileAttachment = {
               ...target.fileAttachment,
               state: progress >= 99 ? 'received' : 'transferring',
@@ -453,7 +477,11 @@ export function App() {
 
   const handleAcceptFile = async (msg: ChatMessage) => {
     const senderPeer = peers.find(
-      (p) => p.id === msg.senderId || (msg.fileAttachment?.senderIp && p.ip === msg.fileAttachment.senderIp)
+      (p) =>
+        p.id === msg.senderId ||
+        (msg.fileAttachment?.senderIp && p.ip === msg.fileAttachment.senderIp) ||
+        (msg.senderIp && p.ip === msg.senderIp) ||
+        (msg.peerIp && p.ip === msg.peerIp)
     );
     const res = await conversationManager.acceptFileTransfer(msg, senderPeer);
     if (!res.success && res.error) {
@@ -462,27 +490,58 @@ export function App() {
     }
   };
 
-  const handleOpenInFolder = (savedPath?: string, fileName?: string) => {
-    const defaultDir = config.downloadDir;
-    const targetPath = savedPath || `${defaultDir}/${fileName || ''}`;
+  const handleResumeFile = async (msg: ChatMessage) => {
+    const senderPeer = peers.find(
+      (p) =>
+        p.id === msg.senderId ||
+        (msg.fileAttachment?.senderIp && p.ip === msg.fileAttachment.senderIp) ||
+        (msg.senderIp && p.ip === msg.senderIp) ||
+        (msg.peerIp && p.ip === msg.peerIp)
+    );
+    const res = await conversationManager.resumeFileTransfer(msg, senderPeer);
+    if (!res.success && res.error) {
+      setFolderToast(`无法断点续传：${res.error}`);
+      setTimeout(() => setFolderToast(null), 4000);
+    }
+  };
 
-    if (isTauri()) {
-      import('@tauri-apps/api/core').then(({ invoke }) => {
-        invoke('open_in_folder', { path: targetPath }).catch((err) => {
-          console.warn('调用打开文件夹指令失败:', err);
-        });
+  const handleOpenInFolder = async (savedPath?: string, fileName?: string, isMedia?: boolean) => {
+    let targetPath = savedPath;
+    if (!targetPath) {
+      if (isMedia) {
+        try {
+          const mediaDir = await ipc.getMediaDir();
+          targetPath = fileName ? `${mediaDir}/${fileName}` : mediaDir;
+        } catch {
+          targetPath = fileName;
+        }
+      } else {
+        const defaultDir = config.downloadDir;
+        targetPath = fileName ? `${defaultDir}/${fileName}` : defaultDir;
+      }
+    }
+
+    if (isTauri() && targetPath) {
+      ipc.openInFolder(targetPath).catch((err) => {
+        console.warn('调用打开文件夹指令失败:', err);
       });
     }
-    setFolderToast(`已在文件管理器中定位到: ${targetPath}`);
+    setFolderToast(`已在文件管理器中定位: ${targetPath}`);
     setTimeout(() => setFolderToast(null), 3000);
   };
 
-  const handlePreviewMedia = (type: 'image' | 'video', url: string, fileName: string) => {
+  const handlePreviewMedia = (
+    type: 'image' | 'video' | 'audio',
+    url: string,
+    fileName: string,
+    filePath?: string
+  ) => {
     setLightbox({
       isOpen: true,
       type,
       url,
       fileName,
+      filePath,
     });
   };
 
@@ -540,6 +599,7 @@ export function App() {
           onSendMessage={handleSendMessage}
           onSendFile={handleSendFile}
           onAcceptFile={handleAcceptFile}
+          onResumeFile={handleResumeFile}
           onOpenInFolder={handleOpenInFolder}
           onPreviewMedia={handlePreviewMedia}
         />
@@ -560,6 +620,8 @@ export function App() {
         type={lightbox.type}
         url={lightbox.url}
         fileName={lightbox.fileName}
+        filePath={lightbox.filePath}
+        onOpenInFolder={handleOpenInFolder}
         onClose={() => setLightbox((prev) => ({ ...prev, isOpen: false }))}
       />
     </div>

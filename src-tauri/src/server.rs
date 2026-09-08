@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
 #[derive(Clone)]
 struct ServerContext {
@@ -34,6 +34,10 @@ struct StreamTransferParams {
     file_size: u64,
     #[serde(default)]
     sender_id: String,
+    #[serde(default)]
+    offset: u64,
+    #[serde(default)]
+    folder: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -188,23 +192,54 @@ async fn handle_stream_transfer(
         })
         .collect();
 
+    // 针对媒体文件 (Media) 与普通文件 (Files) 进行目录区分
+    let is_media = params.folder.eq_ignore_ascii_case("media");
+    let sub_folder = if is_media { "Media" } else { "Files" };
+
     // 建立多重备选存储路径列表 (应对权限拒绝 os error 5 或系统限制)
     let mut candidate_dirs = Vec::new();
-    let preferred_str = { ctx.download_dir.read().await.clone() };
-    if !preferred_str.trim().is_empty() {
-        candidate_dirs.push(std::path::PathBuf::from(preferred_str));
+    if is_media {
+        if let Some(doc) = dirs::document_dir() {
+            candidate_dirs.push(doc.join("LAN Drop").join("Media"));
+        }
+    } else {
+        let preferred_str = { ctx.download_dir.read().await.clone() };
+        if !preferred_str.trim().is_empty() {
+            candidate_dirs.push(std::path::PathBuf::from(preferred_str));
+        }
     }
     if let Some(doc) = dirs::document_dir() {
-        candidate_dirs.push(doc.join("LAN Drop").join("Files"));
+        candidate_dirs.push(doc.join("LAN Drop").join(sub_folder));
     }
     if let Some(dl) = dirs::download_dir() {
-        candidate_dirs.push(dl.join("LAN Drop").join("Files"));
+        candidate_dirs.push(dl.join("LAN Drop").join(sub_folder));
     }
     if let Some(data) = dirs::data_local_dir() {
-        candidate_dirs.push(data.join("LAN Drop").join("Files"));
+        candidate_dirs.push(data.join("LAN Drop").join(sub_folder));
     }
-    candidate_dirs.push(std::env::temp_dir().join("LAN Drop").join("Files"));
-    candidate_dirs.push(std::path::PathBuf::from(".").join("LAN Drop").join("Files"));
+    candidate_dirs.push(std::env::temp_dir().join("LAN Drop").join(sub_folder));
+    candidate_dirs.push(std::path::PathBuf::from(".").join("LAN Drop").join(sub_folder));
+
+    // 若为 MD5 命名的媒体文件且本地已完整存在，直接复用已有文件，避免重复写入
+    if is_media && params.file_size > 0 {
+        for dir in &candidate_dirs {
+            let existing_dest = dir.join(&safe_file_name);
+            if existing_dest.exists() {
+                if let Ok(meta) = std::fs::metadata(&existing_dest) {
+                    if meta.len() == params.file_size {
+                        log::info!("媒体文件已存在于本地且大小一致，跳过重复写入: {:?}", existing_dest);
+                        let _ = ctx.app.emit("transfer://incoming_complete", serde_json::json!({
+                            "taskId": params.task_id,
+                            "fileName": safe_file_name,
+                            "savedPath": existing_dest.to_string_lossy(),
+                            "totalSize": meta.len(),
+                        }));
+                        return Ok(StatusCode::OK);
+                    }
+                }
+            }
+        }
+    }
 
     let mut created_file: Option<(File, std::path::PathBuf)> = None;
     let mut last_err = String::new();
@@ -217,13 +252,27 @@ async fn handle_stream_transfer(
                 continue;
             }
         }
-        match File::create(&file_dest).await {
-            Ok(f) => {
+
+        let open_res = if params.offset > 0 {
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&file_dest)
+                .await
+        } else {
+            File::create(&file_dest).await
+        };
+
+        match open_res {
+            Ok(mut f) => {
+                if params.offset > 0 {
+                    let _ = f.seek(SeekFrom::Start(params.offset)).await;
+                }
                 created_file = Some((f, file_dest));
                 break;
             }
             Err(e) => {
-                last_err = format!("创建文件失败 ({:?}): {}", file_dest, e);
+                last_err = format!("创建/打开文件失败 ({:?}): {}", file_dest, e);
             }
         }
     }
@@ -233,16 +282,38 @@ async fn handle_stream_transfer(
         None => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("尝试所有可用存储路径均失败: {}", last_err))),
     };
 
-    let mut received_bytes: u64 = 0;
+    let mut received_bytes: u64 = params.offset;
     let mut last_emit_time = tokio::time::Instant::now();
-    let mut last_bytes = 0u64;
+    let mut last_bytes = params.offset;
     let mut is_first_chunk = true;
 
     while let Some(chunk_result) = body_stream.next().await {
-        let chunk = chunk_result.map_err(|e| (StatusCode::BAD_REQUEST, format!("数据流读取中断: {}", e)))?;
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("写入磁盘失败: {}", e)))?;
+        let chunk = match chunk_result {
+            Ok(c) => c,
+            Err(e) => {
+                let err_msg = format!("数据流读取中断: {}", e);
+                let _ = ctx.app.emit("transfer://incoming_error", serde_json::json!({
+                    "taskId": params.task_id,
+                    "fileName": safe_file_name,
+                    "transferred": received_bytes,
+                    "total": params.file_size,
+                    "error": err_msg,
+                }));
+                return Err((StatusCode::BAD_REQUEST, err_msg));
+            }
+        };
+
+        if let Err(e) = file.write_all(&chunk).await {
+            let err_msg = format!("写入磁盘失败: {}", e);
+            let _ = ctx.app.emit("transfer://incoming_error", serde_json::json!({
+                "taskId": params.task_id,
+                "fileName": safe_file_name,
+                "transferred": received_bytes,
+                "total": params.file_size,
+                "error": err_msg,
+            }));
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+        }
 
         received_bytes += chunk.len() as u64;
 
@@ -279,6 +350,48 @@ async fn handle_stream_transfer(
     }));
 
     Ok(StatusCode::OK)
+}
+
+/// 检查目标文件在本地已落盘的大小（用于断点续传精准确定 offset）
+pub async fn query_partial_file_size(download_dir: &str, file_name: &str) -> u64 {
+    let file_name_only = std::path::Path::new(file_name)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_name.to_string());
+
+    let safe_name: String = file_name_only
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect();
+
+    let mut candidate_dirs = Vec::new();
+    if !download_dir.trim().is_empty() {
+        candidate_dirs.push(std::path::PathBuf::from(download_dir));
+    }
+    if let Some(doc) = dirs::document_dir() {
+        candidate_dirs.push(doc.join("LAN Drop").join("Files"));
+    }
+    if let Some(dl) = dirs::download_dir() {
+        candidate_dirs.push(dl.join("LAN Drop").join("Files"));
+    }
+    if let Some(data) = dirs::data_local_dir() {
+        candidate_dirs.push(data.join("LAN Drop").join("Files"));
+    }
+    candidate_dirs.push(std::env::temp_dir().join("LAN Drop").join("Files"));
+    candidate_dirs.push(std::path::PathBuf::from(".").join("LAN Drop").join("Files"));
+
+    for dir in candidate_dirs {
+        let p = dir.join(&safe_name);
+        if let Ok(meta) = tokio::fs::metadata(&p).await {
+            if meta.is_file() {
+                return meta.len();
+            }
+        }
+    }
+    0
 }
 
 /// 发送 HTTP 消息给对端

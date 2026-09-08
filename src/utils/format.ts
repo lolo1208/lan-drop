@@ -12,10 +12,14 @@ export function formatBytes(bytes: number, decimals = 2): string {
 }
 
 export function formatSpeed(bytesPerSec: number): string {
-  if (bytesPerSec === 0) return '0 MB/s';
+  if (!bytesPerSec || bytesPerSec <= 0) return '0.0 MB/s';
   const mbps = bytesPerSec / (1024 * 1024);
   if (mbps >= 1000) {
-    return (mbps / 1024).toFixed(2) + ' GB/s';
+    return (mbps / 1024).toFixed(1) + ' GB/s';
+  }
+  if (mbps < 0.1) {
+    const kbps = bytesPerSec / 1024;
+    return kbps.toFixed(1) + ' KB/s';
   }
   return mbps.toFixed(1) + ' MB/s';
 }

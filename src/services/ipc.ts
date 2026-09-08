@@ -253,17 +253,42 @@ class IPCService {
           });
         }
 
-        // 拦截系统控制信令：如对方同意接收文件
-        if (msg.msgType === 'system' && msg.content && msg.content.startsWith('file_accept:')) {
-          const fileMsgId = msg.content.split(':')[1];
-          this.emit('file://accepted', {
-            fileId: fileMsgId,
-            receiverId: msg.senderId,
-            receiverName: msg.senderName,
-            receiverIp: senderIp,
-            receiverPort: senderPort,
-          });
-          return; // 系统信令不作为常规聊天气泡展示
+        // 拦截系统控制信令：如对方同意接收文件 或 对方请求断点续传文件
+        if (msg.msgType === 'system' && msg.content) {
+          if (msg.content.startsWith('file_accept:')) {
+            const parts = msg.content.split(':');
+            const fileMsgId = parts[1];
+            const folder = parts[2] || undefined;
+            const destName = parts[3] || undefined;
+            this.emit('file://accepted', {
+              fileId: fileMsgId,
+              receiverId: msg.senderId,
+              receiverName: msg.senderName,
+              receiverIp: senderIp,
+              receiverPort: senderPort,
+              offset: 0,
+              folder,
+              destName,
+            });
+            return; // 系统信令不作为常规聊天气泡展示
+          } else if (msg.content.startsWith('file_resume:')) {
+            const parts = msg.content.split(':');
+            const fileMsgId = parts[1];
+            const offset = Number(parts[2]) || 0;
+            const folder = parts[3] || undefined;
+            const destName = parts[4] || undefined;
+            this.emit('file://accepted', {
+              fileId: fileMsgId,
+              receiverId: msg.senderId,
+              receiverName: msg.senderName,
+              receiverIp: senderIp,
+              receiverPort: senderPort,
+              offset,
+              folder,
+              destName,
+            });
+            return;
+          }
         }
 
         // 常规聊天消息：立即在前端广播消息，保证 UI 毫秒级零延迟即时刷新与展现
@@ -351,6 +376,10 @@ class IPCService {
 
       await safeListen('transfer://error', (event: any) => {
         this.emit('transfer://error', event.payload);
+      });
+
+      await safeListen('transfer://incoming_error', (event: any) => {
+        this.emit('transfer://incoming_error', event.payload);
       });
 
       // 2. 定期检测设备在线状态 (超过 25 秒未收到心跳则标记离线)
@@ -462,6 +491,44 @@ class IPCService {
         } else if (type === 'CHAT_MSG') {
           if (data.peerId === this.localConfig.id || data.peerId === data.senderId) {
             const incoming = { ...data, peerId: data.senderId };
+
+            if (incoming.msgType === 'system' && incoming.content) {
+              if (incoming.content.startsWith('file_accept:')) {
+                const parts = incoming.content.split(':');
+                const fileMsgId = parts[1];
+                const folder = parts[2] || undefined;
+                const destName = parts[3] || undefined;
+                this.emit('file://accepted', {
+                  fileId: fileMsgId,
+                  receiverId: incoming.senderId,
+                  receiverName: incoming.senderName,
+                  receiverIp: incoming.senderIp,
+                  receiverPort: incoming.senderPort || 57088,
+                  offset: 0,
+                  folder,
+                  destName,
+                });
+                return;
+              } else if (incoming.content.startsWith('file_resume:')) {
+                const parts = incoming.content.split(':');
+                const fileMsgId = parts[1];
+                const offset = Number(parts[2]) || 0;
+                const folder = parts[3] || undefined;
+                const destName = parts[4] || undefined;
+                this.emit('file://accepted', {
+                  fileId: fileMsgId,
+                  receiverId: incoming.senderId,
+                  receiverName: incoming.senderName,
+                  receiverIp: incoming.senderIp,
+                  receiverPort: incoming.senderPort || 57088,
+                  offset,
+                  folder,
+                  destName,
+                });
+                return;
+              }
+            }
+
             this.emit('chat://received', incoming);
             this.emit('chat://updated', incoming);
             storageService.saveChatMessage(incoming);
@@ -522,18 +589,6 @@ class IPCService {
   // --- 对外接口：获取已发现对端列表 ---
   async getDiscoveredPeers(): Promise<PeerDevice[]> {
     return [...this.virtualPeers];
-  }
-
-  // --- 手动切换对端设备的在线/离线状态 (支持测试与调试联系人离线保留/隐藏逻辑) ---
-  togglePeerStatus(peerIdOrIp: string): 'online' | 'offline' | null {
-    const peer = this.virtualPeers.find((p) => p.id === peerIdOrIp || p.ip === peerIdOrIp);
-    if (!peer) return null;
-    peer.status = peer.status === 'online' ? 'offline' : 'online';
-    if (peer.status === 'online') {
-      peer.lastSeen = Date.now();
-    }
-    this.emit('peers://updated', [...this.virtualPeers]);
-    return peer.status;
   }
 
   // --- 发送即时聊天消息 ---
@@ -664,6 +719,141 @@ class IPCService {
 
     await storageService.saveChatMessage(replyMsg);
     this.emit('chat://updated', replyMsg);
+  }
+
+  // 检查目标文件在本地已落盘的字节大小（用于断点续传）
+  async getPartialFileSize(fileName: string): Promise<number> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const size = await invoke<number>('get_partial_file_size', { fileName });
+        return size || 0;
+      } catch (err) {
+        console.warn('获取已存在的部分文件大小失败:', err);
+        return 0;
+      }
+    }
+    return 0;
+  }
+
+  // 检查本地文件是否真实存在（用于聊天气泡精准检测“文件已丢失”状态）
+  async checkFileExists(filePath?: string): Promise<boolean> {
+    if (!filePath || filePath.trim() === '') return false;
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const exists = await invoke<boolean>('check_file_exists', { filePath });
+        return Boolean(exists);
+      } catch (err) {
+        console.warn('检查本地文件状态失败:', err);
+        return false;
+      }
+    }
+    // Web 预览模式：若路径存在且未被标记清除，默认视为存在
+    return !filePath.includes('__missing__');
+  }
+
+  // 读取本地媒体文件为 Data URL（用于 Tauri 或 Webview 直接显示）
+  async readMediaDataUrl(filePath: string, mimeType?: string): Promise<string> {
+    if (!filePath || filePath.trim() === '') return '';
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const dataUrl = await invoke<string>('read_media_data_url', {
+          filePath,
+          mimeType,
+        });
+        return dataUrl || '';
+      } catch (err) {
+        console.warn('读取本地媒体 Data URL 失败:', err);
+        return '';
+      }
+    }
+    return '';
+  }
+
+  // 获取可靠的本地媒体 URL（优先 convertFileSrc，必要时读取 Data URL）
+  async getMediaUrl(filePath?: string, mimeType?: string): Promise<string> {
+    if (!filePath || filePath.trim() === '') return '';
+    if (isTauri()) {
+      try {
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        const assetUrl = convertFileSrc(filePath);
+        if (assetUrl) return assetUrl;
+      } catch {
+        // fallback to data url
+      }
+      return this.readMediaDataUrl(filePath, mimeType);
+    }
+    return '';
+  }
+
+  // 在操作系统文件管理器中定位并打开指定目录，选中该文件
+  async openInFolder(filePath: string): Promise<void> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('open_in_folder', { path: filePath });
+      } catch (err) {
+        console.warn('调用原生 open_in_folder 失败:', err);
+      }
+    } else {
+      console.log('[Web模拟] 打开所在目录并选中文件:', filePath);
+    }
+  }
+
+  // 获取 [用户文档]/LAN Drop/Media 目录绝对路径
+  async getMediaDir(): Promise<string> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const dir = await invoke<string>('get_media_dir');
+        return dir;
+      } catch {
+        // fallback
+      }
+    }
+    return '[用户文档]/LAN Drop/Media';
+  }
+
+  // 保存媒体文件到 [用户文档]/LAN Drop/Media 目录，名称为 md5 值
+  async saveMediaFileToDisk(md5: string, ext: string, data: Uint8Array): Promise<string> {
+    const cleanExt = ext.replace(/^\./, '');
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const savedPath = await invoke<string>('save_media_file_to_disk', {
+          md5,
+          ext: cleanExt,
+          data: Array.from(data),
+        });
+        return savedPath;
+      } catch (err) {
+        console.error('Tauri 保存媒体文件失败:', err);
+      }
+    }
+    const fileName = cleanExt ? `${md5}.${cleanExt}` : md5;
+    return `[用户文档]/LAN Drop/Media/${fileName}`;
+  }
+
+  // 发送方从本地原路径快速保存/拷贝到 Media 目录（名称为 md5）
+  async saveMediaFromPath(md5: string, ext: string, sourcePath: string): Promise<string> {
+    const cleanExt = ext.replace(/^\./, '');
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const savedPath = await invoke<string>('save_media_from_path', {
+          md5,
+          ext: cleanExt,
+          sourcePath,
+        });
+        return savedPath;
+      } catch (err) {
+        console.warn('Tauri 从原路径保存媒体失败，尝试读写保存:', err);
+      }
+    }
+    const fileName = cleanExt ? `${md5}.${cleanExt}` : md5;
+    return `[用户文档]/LAN Drop/Media/${fileName}`;
   }
 }
 

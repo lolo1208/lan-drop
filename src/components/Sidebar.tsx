@@ -54,18 +54,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [targetPortInput, setTargetPortInput] = useState('57088');
   const [isProbing, setIsProbing] = useState(false);
   const [probeError, setProbeError] = useState('');
-  const [contextMenu, setContextMenu] = useState<{
-    x: number;
-    y: number;
-    peer: PeerDevice;
-  } | null>(null);
-
-  // 全局点击自动关闭联系人右键操作菜单
-  useEffect(() => {
-    const handleCloseMenu = () => setContextMenu(null);
-    window.addEventListener('click', handleCloseMenu);
-    return () => window.removeEventListener('click', handleCloseMenu);
-  }, []);
 
   const handleRefreshScan = () => {
     setIsScanning(true);
@@ -316,14 +304,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div
                 key={peer.id}
                 onClick={() => onSelectPeer(peer)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setContextMenu({
-                    x: e.clientX,
-                    y: e.clientY,
-                    peer,
-                  });
-                }}
+                onContextMenu={(e) => e.preventDefault()}
                 className={`group relative px-3.5 py-3 flex items-start space-x-3 cursor-pointer transition-colors border-l-[3px] ${
                   isSelected
                     ? 'bg-[#0078d4]/15 border-l-[#0078d4] text-white'
@@ -511,55 +492,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             </form>
           </div>
-        </div>
-      )}
-      {/* 联系人右键操作菜单 (支持快捷复制IP、模拟在线/离线切换状态进行逻辑验收) */}
-      {contextMenu && (
-        <div
-          className="fixed z-50 bg-[#252526] border border-[#3c3c3c] rounded-lg shadow-2xl py-1 text-xs text-[#cccccc] w-52 select-none"
-          style={{
-            top: Math.min(window.innerHeight - 130, contextMenu.y),
-            left: Math.min(window.innerWidth - 220, contextMenu.x),
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="px-3 py-1.5 border-b border-[#333333] text-[11px] text-[#858585] truncate font-medium">
-            {contextMenu.peer.name}
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              ipc.togglePeerStatus(contextMenu.peer.id);
-              setContextMenu(null);
-            }}
-            className="w-full px-3 py-1.5 text-left hover:bg-[#0078d4] hover:text-white flex items-center justify-between transition-colors cursor-pointer"
-          >
-            <span>模拟切换在线/离线</span>
-            <span
-              className={`text-[10px] px-1.5 py-0.2 rounded font-medium ${
-                contextMenu.peer.status === 'online'
-                  ? 'text-red-300 bg-red-950/60'
-                  : 'text-emerald-300 bg-emerald-950/60'
-              }`}
-            >
-              {contextMenu.peer.status === 'online' ? '设为离线' : '设为在线'}
-            </span>
-          </button>
-          {contextMenu.peer.ip && (
-            <button
-              type="button"
-              onClick={() => {
-                navigator.clipboard?.writeText(contextMenu.peer.ip);
-                setContextMenu(null);
-              }}
-              className="w-full px-3 py-1.5 text-left hover:bg-[#0078d4] hover:text-white flex items-center justify-between transition-colors cursor-pointer"
-            >
-              <span>复制设备 IP</span>
-              <span className="text-[10px] text-[#858585] font-mono group-hover:text-white">
-                {contextMenu.peer.ip}
-              </span>
-            </button>
-          )}
         </div>
       )}
     </div>

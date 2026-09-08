@@ -237,12 +237,13 @@ class LocalStorageService {
   }
 
   async getChatMessages(peerId: string): Promise<ChatMessage[]> {
+    let resultList: ChatMessage[] = [];
     if (isTauri()) {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         const list = await invoke<ChatMessage[]>('db_get_chat_messages_by_peer', { peerId });
         if (Array.isArray(list)) {
-          return list;
+          return this.sanitizeLoadedChats(list);
         }
       } catch (e) {
         console.warn('Tauri SQLite 按联系人读取聊天记录失败:', e);
@@ -251,7 +252,7 @@ class LocalStorageService {
 
     try {
       const db = await this.getDb();
-      return new Promise((resolve, reject) => {
+      resultList = await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_CHATS, 'readonly');
         const store = tx.objectStore(STORE_CHATS);
         const index = store.index('peerId');
@@ -264,10 +265,12 @@ class LocalStorageService {
         request.onerror = () => reject(request.error);
       });
     } catch {
-      return this.fallbackGetAll<ChatMessage>('chats').then((all) =>
-        all.filter((m) => m.peerId === peerId || m.senderId === peerId).sort((a, b) => a.timestamp - b.timestamp)
-      );
+      const all = await this.fallbackGetAll<ChatMessage>('chats');
+      resultList = all
+        .filter((m) => m.peerId === peerId || m.senderId === peerId)
+        .sort((a, b) => a.timestamp - b.timestamp);
     }
+    return this.sanitizeLoadedChats(resultList);
   }
 
   async getAllChats(): Promise<ChatMessage[]> {
@@ -276,16 +279,17 @@ class LocalStorageService {
         const { invoke } = await import('@tauri-apps/api/core');
         const list = await invoke<ChatMessage[]>('db_get_all_chat_messages');
         if (Array.isArray(list)) {
-          return list;
+          return this.sanitizeLoadedChats(list);
         }
       } catch (e) {
         console.warn('Tauri SQLite 读取全部聊天记录失败:', e);
       }
     }
 
+    let resultList: ChatMessage[] = [];
     try {
       const db = await this.getDb();
-      return new Promise((resolve, reject) => {
+      resultList = await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_CHATS, 'readonly');
         const store = tx.objectStore(STORE_CHATS);
         const request = store.getAll();
@@ -297,8 +301,21 @@ class LocalStorageService {
         request.onerror = () => reject(request.error);
       });
     } catch {
-      return this.fallbackGetAll<ChatMessage>('chats');
+      resultList = await this.fallbackGetAll<ChatMessage>('chats');
     }
+    return this.sanitizeLoadedChats(resultList);
+  }
+
+  // 历史消息启动自愈修复：若因应用关闭、崩溃或进程重启导致遗留状态为 transferring 的传输任务，自动转为 failed（传输中断）以展示继续接收按钮
+  private sanitizeLoadedChats(list: ChatMessage[]): ChatMessage[] {
+    for (const msg of list) {
+      if (msg.fileAttachment && msg.fileAttachment.state === 'transferring') {
+        msg.fileAttachment.state = 'failed';
+        msg.fileAttachment.speed = 0;
+        this.saveChatMessage(msg).catch(() => {});
+      }
+    }
+    return list;
   }
 
   async clearChat(peerId: string): Promise<void> {

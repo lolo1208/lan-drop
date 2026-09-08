@@ -60,12 +60,16 @@ export interface FileAttachmentMeta {
   name: string;
   size: number;
   type: string; // MIME 如 'image/png', 'video/mp4', 'audio/mp3', 'application/pdf'
-  blobUrl?: string; // 内存预览 URL 或已接收下载 URL
+  md5?: string; // 文件的 MD5 哈希值，用于 Media 自动保存与去重
+  blobUrl?: string; // 内存预览 URL 或已接收下载 URL (或 asset:// 本地协议 URL)
   originalPath?: string; // (发送方) 本地真实路径
-  state: FileTransferState; // 传输状态：等待接收 / 传输中 / 已接收
+  state: FileTransferState; // 传输状态：等待接收 / 传输中 / 已接收 / 传输中断
   progress: number; // 0 - 100
   speed: number; // 实时速率 bytes/s
-  savedPath?: string; // 接收方磁盘绝对路径（如 [用户文档]/lan-drop/xxx）
+  transferredBytes?: number; // 已传输字节数（用于断点续传 offset）
+  savedPath?: string; // 磁盘绝对路径（如 [用户文档]/LAN Drop/Media/xxx 或 Files/xxx）
+  isMissing?: boolean; // 本地源文件是否已丢失
+  isMedia?: boolean; // 是否为图片/音视频等多媒体文件
   senderIp: string;
   senderPort: number;
 }

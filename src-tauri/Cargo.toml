@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 # Tauri v2 核心框架
-tauri = { version = "2.0.0", features = ["tray-icon"] }
+tauri = { version = "2.0.0", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-shell = "2.0.0"
 tauri-plugin-dialog = "2.0.0"
 tauri-plugin-fs = "2.0.0"
@@ -35,6 +35,7 @@ bytes = "1.0"
 uuid = { version = "1.8", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 urlencoding = "2.1"
+base64 = "0.22"
 dirs = "5.0"
 
 # 本地 SQLite 持久化 (传输与聊天记录)

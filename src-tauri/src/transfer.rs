@@ -1,41 +1,51 @@
-// LAN Drop (内网投送) - Tokio + Reqwest 磁盘流式推送
+// LAN Drop (内网投送) - Tokio + Reqwest 磁盘流式推送（支持断点续传 offset）
 use futures_util::StreamExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::File;
+use tokio::io::{AsyncSeekExt, SeekFrom};
 use tokio_util::io::ReaderStream;
 
 /// 发送端：将本地磁盘文件以 64KB Chunk 直接流式发往接收端 Axum 服务
-/// 零内存中间缓冲堆积，跑满百兆/千兆网卡
+/// 支持断点续传（从 offset 字节开始读取并推流），零内存中间缓冲堆积，跑满百兆/千兆网卡
 pub async fn stream_file_to_peer<F>(
     target_ip: &str,
     target_port: u16,
     file_path: &str,
     task_id: &str,
+    offset: u64,
+    dest_name: Option<&str>,
+    folder: Option<&str>,
     progress_callback: F,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     F: Fn(u64, u64, f64) + Send + Sync + 'static,
 {
     let path = Path::new(file_path);
-    let file_name = path
+    let original_name = path
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".to_string());
+    let file_name = dest_name.unwrap_or(&original_name);
     let metadata = tokio::fs::metadata(path).await?;
     let total_size = metadata.len();
 
-    let file = File::open(path).await?;
+    let mut file = File::open(path).await?;
+    if offset > 0 && offset < total_size {
+        file.seek(SeekFrom::Start(offset)).await?;
+    }
+
+    let remaining_bytes = total_size.saturating_sub(offset);
 
     let progress_callback = Arc::new(progress_callback);
     let cb_clone = progress_callback.clone();
 
     // 构建包装 Stream，每次读取 chunk 自动计算流速并触发回调
     let mut reader_stream = ReaderStream::with_capacity(file, 64 * 1024); // 64KB 缓冲区
-    let mut sent_bytes = 0u64;
+    let mut sent_bytes = offset;
     let mut last_time = Instant::now();
-    let mut last_bytes = 0u64;
+    let mut last_bytes = offset;
 
     let async_stream = async_stream::stream! {
         while let Some(chunk_res) = reader_stream.next().await {
@@ -63,14 +73,21 @@ where
         .tcp_nodelay(true) // 禁用 Nagle 算法，降低微延迟
         .build()?;
 
+    let folder_param = folder.unwrap_or("");
     let target_url = format!(
-        "http://{}:{}/api/transfer/stream?task_id={}&file_name={}&file_size={}&sender_id=local",
-        target_ip, target_port, urlencoding::encode(task_id), urlencoding::encode(&file_name), total_size
+        "http://{}:{}/api/transfer/stream?task_id={}&file_name={}&file_size={}&sender_id=local&offset={}&folder={}",
+        target_ip,
+        target_port,
+        urlencoding::encode(task_id),
+        urlencoding::encode(file_name),
+        total_size,
+        offset,
+        urlencoding::encode(folder_param)
     );
 
     let resp = client
         .post(&target_url)
-        .header(reqwest::header::CONTENT_LENGTH, total_size)
+        .header(reqwest::header::CONTENT_LENGTH, remaining_bytes)
         .body(body)
         .send()
         .await?;

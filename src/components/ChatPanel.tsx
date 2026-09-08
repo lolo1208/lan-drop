@@ -12,6 +12,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  ChevronDown,
   Paperclip,
   Radio,
   Send,
@@ -48,8 +49,9 @@ interface ChatPanelProps {
   onSendMessage: (peer: PeerDevice, text: string) => void;
   onSendFile: (peer: PeerDevice, file: File | { name: string; size: number; type: string; blob: Blob }) => void;
   onAcceptFile: (msg: ChatMessage) => void;
-  onOpenInFolder: (savedPath?: string, fileName?: string) => void;
-  onPreviewMedia: (type: 'image' | 'video', url: string, fileName: string) => void;
+  onResumeFile?: (msg: ChatMessage) => void;
+  onOpenInFolder: (savedPath?: string, fileName?: string, isMedia?: boolean) => void;
+  onPreviewMedia: (type: 'image' | 'video' | 'audio', url: string, fileName: string, filePath?: string) => void;
 }
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
@@ -62,6 +64,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onSendMessage,
   onSendFile,
   onAcceptFile,
+  onResumeFile,
   onOpenInFolder,
   onPreviewMedia,
 }) => {
@@ -81,10 +84,43 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     return [];
   });
 
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
+
+  const [showScrollBottomBtn, setShowScrollBottomBtn] = useState(false);
+  const [unreadNewCount, setUnreadNewCount] = useState(0);
+
+  const isAtBottomRef = useRef<boolean>(true);
+  const prevPeerIdRef = useRef<string | null>(null);
+  const lastKnownMsgIdRef = useRef<string | null>(null);
+
+  // 一键平滑定位到底部
+  const scrollToBottom = (smooth = true) => {
+    messagesEndRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto' });
+    setShowScrollBottomBtn(false);
+    setUnreadNewCount(0);
+    isAtBottomRef.current = true;
+  };
+
+  // 监听聊天框手动滚动：距离底部 > 80px 时判定为查看历史消息状态，并悬浮“回到底部”或“新消息提示”按钮
+  const handleScroll = () => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const isAtBottomNow = distanceToBottom <= 80;
+
+    isAtBottomRef.current = isAtBottomNow;
+
+    if (isAtBottomNow) {
+      setShowScrollBottomBtn(false);
+      setUnreadNewCount(0);
+    } else {
+      setShowScrollBottomBtn(true);
+    }
+  };
 
   // 过滤展示型消息（彻底排除 system 信令与无附件无内容的空消息）
   const visibleMessages = useMemo(() => {
@@ -97,7 +133,18 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     });
   }, [messages]);
 
-  // 消息吸底或定位到指定搜索到的消息
+  // 1. 切换聊天对象（peer.id 变动）时：重置状态并强制滚到底部
+  useEffect(() => {
+    if (peer && peer.id !== prevPeerIdRef.current) {
+      prevPeerIdRef.current = peer.id;
+      lastKnownMsgIdRef.current = visibleMessages[visibleMessages.length - 1]?.id || null;
+      scrollToBottom(false);
+    }
+  }, [peer?.id]);
+
+  // 2. 收到新消息或历史检索定位时的智能滚动处理：
+  //    - 查看历史消息（!isAtBottomRef.current）时，收到对方新消息绝不自动强行滚动到底部
+  //    - 只有处于底端（isAtBottomRef.current）或是我发出的新消息时，才会自动滚动到底部
   useEffect(() => {
     if (highlightMessageId) {
       const timer = setTimeout(() => {
@@ -107,10 +154,27 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         }
       }, 150);
       return () => clearTimeout(timer);
-    } else {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [visibleMessages, highlightMessageId]);
+
+    if (visibleMessages.length === 0) return;
+
+    const latestMsg = visibleMessages[visibleMessages.length - 1];
+
+    if (latestMsg && latestMsg.id !== lastKnownMsgIdRef.current) {
+      lastKnownMsgIdRef.current = latestMsg.id;
+
+      const isMe =
+        (currentUserId && latestMsg.senderId === currentUserId) ||
+        (currentUserIp && currentUserIp !== '' && latestMsg.senderIp === currentUserIp);
+
+      if (isAtBottomRef.current || isMe) {
+        scrollToBottom(true);
+      } else {
+        setUnreadNewCount((prev) => prev + 1);
+        setShowScrollBottomBtn(true);
+      }
+    }
+  }, [visibleMessages, highlightMessageId, currentUserId, currentUserIp]);
 
   // 点击表情选择器外部自动关闭
   useEffect(() => {
@@ -309,8 +373,34 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         )}
       </div>
 
-      {/* 聊天记录主列表 */}
-      <div className="flex-1 p-4 sm:p-5 overflow-y-auto custom-scrollbar bg-[#1e1e1e]">
+      {/* 聊天记录主容器 */}
+      <div className="flex-1 relative flex flex-col min-h-0 overflow-hidden bg-[#1e1e1e]">
+        {/* 当不在底部时在视口下方中央浮现的“回到底部 / 收到新消息”悬浮控制按钮 */}
+        {showScrollBottomBtn && (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-40 animate-in fade-in zoom-in-95 duration-200">
+            <button
+              onClick={() => scrollToBottom(true)}
+              className={`px-4 py-2 rounded-full text-xs font-bold shadow-2xl flex items-center gap-2 transition-all cursor-pointer border active:scale-95 ${
+                unreadNewCount > 0
+                  ? 'bg-[#0078d4] hover:bg-[#0284c7] active:bg-[#006cc1] text-white border-[#38bdf8]/50 ring-2 ring-[#0078d4]/30 animate-bounce'
+                  : 'bg-[#252526]/90 hover:bg-[#2a2d2e] text-[#cccccc] hover:text-white border-[#3c3c3c] backdrop-blur-md'
+              }`}
+              title="点击跳转至最新消息"
+            >
+              <ChevronDown className={`w-4 h-4 ${unreadNewCount > 0 ? 'text-white' : 'text-[#38bdf8]'}`} />
+              <span>
+                {unreadNewCount > 0 ? `收到 ${unreadNewCount} 条新消息` : '回到底部'}
+              </span>
+            </button>
+          </div>
+        )}
+
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          className="flex-1 p-4 sm:p-5 overflow-y-auto custom-scrollbar bg-[#1e1e1e]"
+        >
+
         {visibleMessages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-4">
             <Radio className="w-8 h-8 text-[#4f4f4f] mb-3 animate-pulse" />
@@ -336,6 +426,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                 peer={peer}
                 isHighlighted={msg.id === highlightMessageId}
                 onAcceptFile={onAcceptFile}
+                onResumeFile={onResumeFile}
                 onOpenInFolder={onOpenInFolder}
                 onPreviewMedia={onPreviewMedia}
               />
@@ -343,6 +434,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           })
         )}
         <div ref={messagesEndRef} />
+        </div>
       </div>
 
       {/* 底部聊天输入区：输入框在上，下方同一行放置 [表情] [发送文件] 以及右侧缩小的 [发送] 按钮 */}

@@ -3,14 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LAN Drop (内网投送)</title>
+    <title>内网投送 - LAN Drop</title>
     <meta name="description" content="LAN Drop (内网投送) - 基于 Tauri v2 + Rust + React 的轻量级无中心局域网极速文件传输与即时投送工具" />
     <meta property="og:title" content="LAN Drop (内网投送)" />
     <meta property="og:description" content="LAN Drop (内网投送) - 基于 Tauri v2 + Rust + React 的轻量级无中心局域网极速文件传输与即时投送工具" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // 全局禁用默认右键上下文菜单，防止在客户端中弹出“返回/刷新/另存为”等网页右键菜单
+      document.addEventListener('contextmenu', function (e) {
+        e.preventDefault();
+      }, { capture: true });
+    </script>
   </head>
-  <body>
+  <body oncontextmenu="return false;">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
