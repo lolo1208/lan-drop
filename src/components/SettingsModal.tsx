@@ -8,6 +8,7 @@
  * 2. 系统设置 (System Settings)：
  *    - 文件保存目录（真实本机文件路径，输入框 + "选择目录"无图标纯文字按钮，支持选择本地目录与恢复默认真实路径）
  *    - 系统更新地址（输入局域网 URL，启动时自动检查并支持即时"检查更新"）
+ *    - 服务通信端口（输入局域网 HTTP 监听与探测端口，默认 57088，支持恢复默认）
  *    - 开机启动（优雅切换开关 Toggle，图标无边框背景与更新地址一致，默认开启）
  */
 
@@ -15,11 +16,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Camera,
   Check,
+  ChevronDown,
+  ChevronUp,
   Contact,
   Globe,
   HardDrive,
   Image as ImageIcon,
   Power,
+  Radio,
   RefreshCw,
   RotateCcw,
   Save,
@@ -62,7 +66,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [formData, setFormData] = useState<LocalDeviceConfig>(() => {
     const rawDir = config.downloadDir;
     const realDir =
-      !rawDir || rawDir === '~/Downloads/FlashDrop' || rawDir.includes('[用户文档]')
+      !rawDir ||
+      rawDir === '~/Downloads/FlashDrop' ||
+      rawDir.includes('[用户文档]') ||
+      rawDir.endsWith('LAN Drop')
         ? defaultRealPath
         : rawDir;
 
@@ -73,11 +80,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       downloadDir: realDir,
       updateUrl: config.updateUrl || '',
       autoStart: config.autoStart !== undefined ? config.autoStart : true,
+      port: config.port || 57088,
     };
   });
 
   const [savedToast, setSavedToast] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
+  const [portError, setPortError] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -88,7 +97,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setActiveTab(defaultTab);
       const rawDir = config.downloadDir;
       const realDir =
-        !rawDir || rawDir === '~/Downloads/FlashDrop' || rawDir.includes('[用户文档]')
+        !rawDir ||
+        rawDir === '~/Downloads/FlashDrop' ||
+        rawDir.includes('[用户文档]') ||
+        rawDir.endsWith('LAN Drop')
           ? (sysInfo?.document_dir || defaultRealPath)
           : rawDir;
 
@@ -99,8 +111,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         downloadDir: realDir,
         updateUrl: config.updateUrl || '',
         autoStart: config.autoStart !== undefined ? config.autoStart : true,
+        port: config.port || 57088,
       });
       setUpdateStatus(null);
+      setPortError(null);
     }
   }, [isOpen, defaultTab, config, defaultRealPath, sysInfo]);
 
@@ -108,7 +122,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSave(formData);
+    const portNum = Number(formData.port);
+    if (isNaN(portNum) || portNum < 1024 || portNum > 65535) {
+      setPortError('端口号必须在 1024 ~ 65535 范围内');
+      setTimeout(() => setPortError(null), 3000);
+      return;
+    }
+    onSave({
+      ...formData,
+      port: portNum,
+    });
     setSavedToast(true);
     setTimeout(() => {
       setSavedToast(false);
@@ -124,8 +147,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       downloadDir: sysInfo?.document_dir || defaultRealPath,
       updateUrl: '',
       autoStart: true,
+      port: 57088,
     });
     setUpdateStatus(null);
+    setPortError(null);
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -139,14 +164,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
 
     try {
-      const avatarDataUrl = await processAvatarImageFile(file, 160);
+      const base64Avatar = await processAvatarImageFile(file);
       setFormData((prev) => ({
         ...prev,
-        avatarUrl: avatarDataUrl,
+        avatarUrl: base64Avatar,
       }));
       setImageError(null);
     } catch (err) {
-      console.error('Failed to process avatar:', err);
+      console.error('Avatar processing failed:', err);
       setImageError('图片处理失败，请重试');
       setTimeout(() => setImageError(null), 3000);
     } finally {
@@ -446,7 +471,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     />
                   </div>
 
-                  {/* "选择文件夹" 改为 "选择目录"，并去掉前面的文件夹图标 */}
                   <button
                     type="button"
                     onClick={handleSelectDirectory}
@@ -471,7 +495,87 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
 
-              {/* 2. 系统更新地址 */}
+              {/* 2. 服务通信端口设置 */}
+              <div className="bg-[#252526]/60 border border-[#333333] rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Radio className="w-4 h-4 text-[#38bdf8]" />
+                    <label className="font-semibold text-[#e0e0e0] text-sm">
+                      服务通信端口
+                    </label>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormData({ ...formData, port: 57088 });
+                      setPortError(null);
+                    }}
+                    className="text-[11px] text-[#38bdf8] hover:text-[#7dd3fc] font-medium transition-colors cursor-pointer"
+                  >
+                    恢复默认端口 (57088)
+                  </button>
+                </div>
+
+                <div className="relative flex items-center">
+                  <input
+                    type="number"
+                    min={1024}
+                    max={65535}
+                    required
+                    value={formData.port ?? 57088}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      setFormData({ ...formData, port: isNaN(val) ? 57088 : val });
+                    }}
+                    placeholder="57088"
+                    className="w-full pl-3.5 pr-10 py-2 bg-[#1e1e1e] border border-[#3c3c3c] focus:border-[#0078d4] rounded-xl text-[#cccccc] font-mono focus:outline-none transition-colors text-xs font-medium"
+                  />
+                  {/* 美化的 VS Code 科技暗黑风格上下微调按钮组 */}
+                  <div className="absolute right-1 top-1 bottom-1 flex flex-col justify-between w-6 py-0.5 border-l border-[#333333]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cur = formData.port ?? 57088;
+                        const next = Math.min(65535, cur + 1);
+                        setFormData({ ...formData, port: next });
+                        setPortError(null);
+                      }}
+                      className="flex-1 flex items-center justify-center rounded-tr-md hover:bg-[#2e2e2e] active:bg-[#383838] text-[#858585] hover:text-[#38bdf8] transition-colors"
+                      title="端口号 +1"
+                    >
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    </button>
+                    <div className="h-[1px] bg-[#333333] mx-0.5" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cur = formData.port ?? 57088;
+                        const next = Math.max(1024, cur - 1);
+                        setFormData({ ...formData, port: next });
+                        setPortError(null);
+                      }}
+                      className="flex-1 flex items-center justify-center rounded-br-md hover:bg-[#2e2e2e] active:bg-[#383838] text-[#858585] hover:text-[#38bdf8] transition-colors"
+                      title="端口号 -1"
+                    >
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between mt-1.5 text-[11px] text-[#858585]">
+                  <span>局域网 HTTP 探测、即时消息与文件流传输的监听端口（默认 57088）</span>
+                  <span className="font-mono text-[#6e7681]">1024 ~ 65535</span>
+                </div>
+
+                {portError && (
+                  <p className="text-[11px] text-rose-400 mt-2 font-medium">
+                    {portError}
+                  </p>
+                )}
+              </div>
+
+              {/* 3. 系统更新地址 */}
               <div className="bg-[#252526]/60 border border-[#333333] rounded-xl p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
@@ -512,7 +616,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               </div>
 
-              {/* 3. 开机启动（图标无边框和背景，与系统更新地址前面的图标一样） */}
+              {/* 4. 开机启动 */}
               <div className="bg-[#252526]/60 border border-[#333333] rounded-xl p-4 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Power className="w-4 h-4 text-[#38bdf8]" />

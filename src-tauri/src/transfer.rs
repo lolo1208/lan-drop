@@ -12,6 +12,7 @@ pub async fn stream_file_to_peer<F>(
     target_ip: &str,
     target_port: u16,
     file_path: &str,
+    task_id: &str,
     progress_callback: F,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
@@ -26,7 +27,6 @@ where
     let total_size = metadata.len();
 
     let file = File::open(path).await?;
-    let task_id = uuid::Uuid::new_v4().to_string();
 
     let progress_callback = Arc::new(progress_callback);
     let cb_clone = progress_callback.clone();
@@ -58,15 +58,22 @@ where
     let body = reqwest::Body::wrap_stream(async_stream);
 
     let client = reqwest::Client::builder()
+        .no_proxy() // 绕过操作系统系统代理/VPN，直接点对点传输
+        .timeout(std::time::Duration::from_secs(3600 * 24)) // 支持大文件长时间推流
         .tcp_nodelay(true) // 禁用 Nagle 算法，降低微延迟
         .build()?;
 
     let target_url = format!(
         "http://{}:{}/api/transfer/stream?task_id={}&file_name={}&file_size={}&sender_id=local",
-        target_ip, target_port, task_id, urlencoding::encode(&file_name), total_size
+        target_ip, target_port, urlencoding::encode(task_id), urlencoding::encode(&file_name), total_size
     );
 
-    let resp = client.post(&target_url).body(body).send().await?;
+    let resp = client
+        .post(&target_url)
+        .header(reqwest::header::CONTENT_LENGTH, total_size)
+        .body(body)
+        .send()
+        .await?;
 
     if resp.status().is_success() {
         progress_callback(total_size, total_size, 0.0);

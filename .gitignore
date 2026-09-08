@@ -23,6 +23,7 @@ coverage/
 *.sqlite
 *.sqlite3
 lan_drop.db
+data.db
 flashdrop.db
 
 # Tauri & Rust Build Artifacts

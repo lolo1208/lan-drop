@@ -6,19 +6,25 @@
  * 3. 用户会话列表：严格按照上次聊天时间从新到旧排序
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ChevronDown,
+  ChevronUp,
   FileCode,
   FileText,
   FileVideo,
+  Globe,
   HardDrive,
   Music,
+  Plus,
+  RefreshCw,
   Search,
   Settings,
   X,
 } from 'lucide-react';
 import { ChatMessage, PeerConversation, PeerDevice } from '../types';
 import { formatBytes, formatRelativeTime } from '../utils/format';
+import { ipc } from '../services/ipc';
 
 interface SidebarProps {
   conversations: PeerConversation[];
@@ -42,6 +48,50 @@ export const Sidebar: React.FC<SidebarProps> = ({
   localAvatarUrl,
 }) => {
   const [search, setSearch] = useState('');
+  const [isScanning, setIsScanning] = useState(false);
+  const [showAddIpModal, setShowAddIpModal] = useState(false);
+  const [targetIpInput, setTargetIpInput] = useState('');
+  const [targetPortInput, setTargetPortInput] = useState('57088');
+  const [isProbing, setIsProbing] = useState(false);
+  const [probeError, setProbeError] = useState('');
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    peer: PeerDevice;
+  } | null>(null);
+
+  // 全局点击自动关闭联系人右键操作菜单
+  useEffect(() => {
+    const handleCloseMenu = () => setContextMenu(null);
+    window.addEventListener('click', handleCloseMenu);
+    return () => window.removeEventListener('click', handleCloseMenu);
+  }, []);
+
+  const handleRefreshScan = () => {
+    setIsScanning(true);
+    ipc.triggerDiscoveryScan();
+    setTimeout(() => {
+      setIsScanning(false);
+    }, 1200);
+  };
+
+  const handleManualConnect = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetIpInput.trim()) return;
+    setIsProbing(true);
+    setProbeError('');
+    try {
+      const port = parseInt(targetPortInput.trim(), 10) || 57088;
+      const peer = await ipc.probePeerIp(targetIpInput.trim(), port);
+      setShowAddIpModal(false);
+      setTargetIpInput('');
+      onSelectPeer(peer);
+    } catch (err: any) {
+      setProbeError(err?.message || err?.toString() || '连接失败，请检查 IP 与应用是否已启动');
+    } finally {
+      setIsProbing(false);
+    }
+  };
 
   // 1. 过滤联系人列表并严格按上次聊天时间降序排序
   const filteredConversations = useMemo(() => {
@@ -136,14 +186,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="text-xs font-semibold text-[#e0e0e0] truncate group-hover:text-white transition-colors">
               {localName}
             </div>
-            <div className="text-[11px] font-mono text-[#858585] truncate">
-              {localIp}
+            <div className="text-[11px] font-mono text-[#858585] truncate" title={localIp ? `局域网IP: ${localIp}` : '正在探测当前局域网 IP'}>
+              {localIp || '局域网在线'}
             </div>
           </div>
         </div>
 
-        {/* 顶部右侧：齿轮按钮 (点击打开系统设置) */}
-        <div className="flex items-center shrink-0">
+        {/* 顶部右侧：手动添加IP、刷新扫描与齿轮设置按钮 */}
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            onClick={() => {
+              setProbeError('');
+              setShowAddIpModal(true);
+            }}
+            className="p-2 rounded-lg text-[#858585] hover:text-[#38bdf8] hover:bg-[#2a2d2e] transition-colors"
+            title="手动输入对端 IP 连接"
+          >
+            <Plus className="w-4 h-4" />
+          </button>
+          <button
+            onClick={handleRefreshScan}
+            className="p-2 rounded-lg text-[#858585] hover:text-[#38bdf8] hover:bg-[#2a2d2e] transition-colors"
+            title="重新扫描当前 /24 网段设备"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin text-[#38bdf8]' : ''}`} />
+          </button>
           <button
             onClick={() => onOpenSettings('system')}
             className="p-2 rounded-lg text-[#858585] hover:text-[#e0e0e0] hover:bg-[#2a2d2e] transition-colors"
@@ -219,8 +286,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* 联系人会话列表 */}
         {filteredConversations.length === 0 && matchedFileMessages.length === 0 ? (
-          <div className="p-8 text-center text-xs text-[#6e7681]">
-            未找到匹配的文件或用户
+          <div className="p-8 text-center text-xs text-[#858585]">
+            <p className="font-medium text-[#cccccc]">
+              {search ? '未找到匹配的文件或联系人' : '正在自动探测局域网设备...'}
+            </p>
+            {!search && (
+              <div className="mt-3 flex flex-col items-center">
+                <p className="text-[11px] text-[#6e7681] leading-relaxed max-w-[200px]">
+                  基于 HTTP 扫描当前 /24 网段。如两台电脑处于不同网段或防火墙拦截，可直接手动直连：
+                </p>
+                <button
+                  onClick={() => {
+                    setProbeError('');
+                    setShowAddIpModal(true);
+                  }}
+                  className="mt-3 px-3 py-1.5 bg-[#0078d4] hover:bg-[#106ebe] text-white rounded-lg text-xs font-medium transition-colors flex items-center space-x-1.5 shadow-sm"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>手动输入 IP 连接</span>
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           filteredConversations.map(({ peer, lastMessage }) => {
@@ -230,15 +316,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div
                 key={peer.id}
                 onClick={() => onSelectPeer(peer)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setContextMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    peer,
+                  });
+                }}
                 className={`group relative px-3.5 py-3 flex items-start space-x-3 cursor-pointer transition-colors border-l-[3px] ${
                   isSelected
                     ? 'bg-[#0078d4]/15 border-l-[#0078d4] text-white'
                     : 'hover:bg-[#2a2d2e] border-transparent text-[#cccccc]'
                 }`}
               >
-                {/* 用户头像 */}
+                {/* 用户头像 + 在线/离线状态指示器 */}
                 <div className="relative shrink-0 mt-0.5">
-                  <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#252526] border border-[#3c3c3c] flex items-center justify-center text-[#cccccc] font-bold text-xs shadow-xs">
+                  <div
+                    className={`w-10 h-10 rounded-xl overflow-hidden bg-[#252526] border border-[#3c3c3c] flex items-center justify-center text-[#cccccc] font-bold text-xs shadow-xs transition-all ${
+                      peer.status === 'offline' ? 'opacity-65 grayscale-[35%]' : 'opacity-100'
+                    }`}
+                  >
                     {peer.avatarUrl ? (
                       <img
                         src={peer.avatarUrl}
@@ -249,14 +347,39 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       <span>{peer.name.slice(0, 2).toUpperCase()}</span>
                     )}
                   </div>
+
+                  {/* 在线 / 离线状态圆点 */}
+                  <span
+                    className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#181818] shadow-xs transition-colors ${
+                      peer.status === 'online'
+                        ? 'bg-[#10b981] ring-1 ring-[#10b981]/40'
+                        : 'bg-[#6e7681]'
+                    }`}
+                    title={peer.status === 'online' ? '当前在线' : '当前离线'}
+                  />
                 </div>
 
-                {/* 用户信息：名称 + 最近消息 */}
+                {/* 用户信息：名称 + 离线徽章 + 最近消息 */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between">
-                    <span className={`text-xs font-semibold truncate ${isSelected ? 'text-white' : 'text-[#e0e0e0]'}`}>
-                      {peer.name}
-                    </span>
+                    <div className="flex items-center space-x-1.5 min-w-0 pr-1">
+                      <span
+                        className={`text-xs font-semibold truncate ${
+                          isSelected
+                            ? 'text-white'
+                            : peer.status === 'offline'
+                            ? 'text-[#a0a0a0]'
+                            : 'text-[#e0e0e0]'
+                        }`}
+                      >
+                        {peer.name}
+                      </span>
+                      {peer.status === 'offline' && (
+                        <span className="text-[9px] text-[#858585] bg-[#252526] px-1 py-0.2 rounded border border-[#3c3c3c] shrink-0 font-normal select-none">
+                          离线
+                        </span>
+                      )}
+                    </div>
                     <span className="text-[10px] text-[#858585] font-mono shrink-0 ml-1">
                       {lastMessage ? formatRelativeTime(lastMessage.timestamp) : ''}
                     </span>
@@ -283,6 +406,162 @@ export const Sidebar: React.FC<SidebarProps> = ({
           })
         )}
       </div>
+
+      {/* 手动输入对端 IP 连接模态框 */}
+      {showAddIpModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-sm bg-[#1e1e1e] border border-[#3c3c3c] rounded-2xl p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-[#2b2b2b]">
+              <div className="flex items-center space-x-2">
+                <Globe className="w-4 h-4 text-[#38bdf8]" />
+                <h3 className="text-sm font-semibold text-white">手动输入对端 IP 连接</h3>
+              </div>
+              <button
+                onClick={() => setShowAddIpModal(false)}
+                className="text-[#858585] hover:text-white p-1 rounded-md"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleManualConnect} className="space-y-3">
+              <div>
+                <label className="block text-xs text-[#858585] mb-1">对端电脑 IP 地址</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="例如: 192.168.1.108"
+                  value={targetIpInput}
+                  onChange={(e) => setTargetIpInput(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#252526] border border-[#3c3c3c] focus:border-[#0078d4] rounded-lg text-xs text-white placeholder-[#6e7681] focus:outline-none"
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs text-[#858585] mb-1">服务端口 (默认 57088)</label>
+                <div className="relative flex items-center">
+                  <input
+                    type="number"
+                    min={1024}
+                    max={65535}
+                    placeholder="57088"
+                    value={targetPortInput}
+                    onChange={(e) => setTargetPortInput(e.target.value)}
+                    className="w-full pl-3 pr-10 py-2 bg-[#252526] border border-[#3c3c3c] focus:border-[#0078d4] rounded-lg text-xs text-white placeholder-[#6e7681] focus:outline-none font-mono"
+                  />
+                  <div className="absolute right-1 top-1 bottom-1 flex flex-col justify-between w-6 py-0.5 border-l border-[#333333]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cur = parseInt(targetPortInput.trim(), 10) || 57088;
+                        const next = Math.min(65535, cur + 1);
+                        setTargetPortInput(String(next));
+                      }}
+                      className="flex-1 flex items-center justify-center rounded-tr hover:bg-[#333333] active:bg-[#3c3c3c] text-[#858585] hover:text-[#38bdf8] transition-colors"
+                      title="端口号 +1"
+                    >
+                      <ChevronUp className="w-3 h-3" />
+                    </button>
+                    <div className="h-[1px] bg-[#333333] mx-0.5" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cur = parseInt(targetPortInput.trim(), 10) || 57088;
+                        const next = Math.max(1024, cur - 1);
+                        setTargetPortInput(String(next));
+                      }}
+                      className="flex-1 flex items-center justify-center rounded-br hover:bg-[#333333] active:bg-[#3c3c3c] text-[#858585] hover:text-[#38bdf8] transition-colors"
+                      title="端口号 -1"
+                    >
+                      <ChevronDown className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {probeError && (
+                <div className="p-2 bg-red-950/40 border border-red-800/60 rounded-lg text-[11px] text-red-300">
+                  {probeError}
+                </div>
+              )}
+
+              <div className="pt-2 flex justify-end space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddIpModal(false)}
+                  className="px-3 py-1.5 rounded-lg text-xs text-[#cccccc] hover:bg-[#2a2d2e]"
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  disabled={isProbing || !targetIpInput.trim()}
+                  className="px-4 py-1.5 bg-[#0078d4] hover:bg-[#106ebe] disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center space-x-1.5"
+                >
+                  {isProbing ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>正在探测...</span>
+                    </>
+                  ) : (
+                    <span>立即连接</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {/* 联系人右键操作菜单 (支持快捷复制IP、模拟在线/离线切换状态进行逻辑验收) */}
+      {contextMenu && (
+        <div
+          className="fixed z-50 bg-[#252526] border border-[#3c3c3c] rounded-lg shadow-2xl py-1 text-xs text-[#cccccc] w-52 select-none"
+          style={{
+            top: Math.min(window.innerHeight - 130, contextMenu.y),
+            left: Math.min(window.innerWidth - 220, contextMenu.x),
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="px-3 py-1.5 border-b border-[#333333] text-[11px] text-[#858585] truncate font-medium">
+            {contextMenu.peer.name}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              ipc.togglePeerStatus(contextMenu.peer.id);
+              setContextMenu(null);
+            }}
+            className="w-full px-3 py-1.5 text-left hover:bg-[#0078d4] hover:text-white flex items-center justify-between transition-colors cursor-pointer"
+          >
+            <span>模拟切换在线/离线</span>
+            <span
+              className={`text-[10px] px-1.5 py-0.2 rounded font-medium ${
+                contextMenu.peer.status === 'online'
+                  ? 'text-red-300 bg-red-950/60'
+                  : 'text-emerald-300 bg-emerald-950/60'
+              }`}
+            >
+              {contextMenu.peer.status === 'online' ? '设为离线' : '设为在线'}
+            </span>
+          </button>
+          {contextMenu.peer.ip && (
+            <button
+              type="button"
+              onClick={() => {
+                navigator.clipboard?.writeText(contextMenu.peer.ip);
+                setContextMenu(null);
+              }}
+              className="w-full px-3 py-1.5 text-left hover:bg-[#0078d4] hover:text-white flex items-center justify-between transition-colors cursor-pointer"
+            >
+              <span>复制设备 IP</span>
+              <span className="text-[10px] text-[#858585] font-mono group-hover:text-white">
+                {contextMenu.peer.ip}
+              </span>
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 };

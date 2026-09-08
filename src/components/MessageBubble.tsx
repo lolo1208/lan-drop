@@ -75,6 +75,11 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     return <FileText className="w-8 h-8 text-[#9cdcfe]" />;
   };
 
+  // 空文本消息或系统消息不渲染无意义空白气泡
+  if (message.msgType === 'system' || (!message.fileAttachment && (!message.content || !message.content.trim()))) {
+    return null;
+  }
+
   return (
     <div
       id={`msg-${message.id}`}
@@ -200,15 +205,11 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
 
             {/* 底部交互按钮条 */}
             <div className="mt-3 pt-2.5 border-t border-[#333333] flex items-center justify-between">
-              {/* 发送方视角 */}
+              {/* 发送方视角：去除左侧“已推送给对方”，状态直接以右侧提示为准 */}
               {isMe ? (
-                <div className="flex items-center justify-between w-full text-[11px] text-[#858585]">
-                  <span className="flex items-center gap-1 text-[#858585]">
-                    <Check className="w-3.5 h-3.5 text-[#89d185]" />
-                    已推送给对方
-                  </span>
+                <div className="flex items-center justify-end w-full text-[11px] text-[#858585]">
                   <span className="text-[#6e7681]">
-                    {file.state === 'received' ? '对方已接收' : '等待对方接收'}
+                    {file.state === 'received' ? '对方已接收' : file.state === 'transferring' ? '对方正在接收...' : '等待对方接收'}
                   </span>
                 </div>
               ) : (
@@ -246,10 +247,10 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                   )}
 
                   {file.state === 'transferring' && (
-                    <span className="text-xs text-[#38bdf8] font-mono flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full bg-[#38bdf8] animate-ping" />
-                      极速流式接收中...
-                    </span>
+                    <div className="flex items-center justify-between w-full text-xs text-[#858585]">
+                      <span>正在写入磁盘...</span>
+                      <span className="text-[#38bdf8] font-mono">{file.progress}%</span>
+                    </div>
                   )}
 
                   {file.state === 'received' && (

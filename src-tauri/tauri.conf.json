@@ -26,5 +26,21 @@
     "security": {
       "csp": null
     }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "LAN Drop OpenSource",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "copyright": "Copyright © 2026 LAN Drop. All rights reserved.",
+    "category": "Utility",
+    "shortDescription": "LAN Drop 局域网极速跨端即时文件投送与通信工具",
+    "longDescription": "基于 Tauri v2 + Rust 构建的纯内网 P2P 高性能文件传输与通信客户端。"
   }
 }

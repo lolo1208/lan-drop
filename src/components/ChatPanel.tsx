@@ -9,7 +9,7 @@
  *    - 下方同一行放置：表情按钮、发送文件按钮、VS Code 标志性科技蓝发送按钮
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Paperclip,
@@ -41,6 +41,9 @@ const COMMON_EMOJIS = [
 interface ChatPanelProps {
   peer: PeerDevice | null;
   messages: ChatMessage[];
+  currentUserId?: string;
+  currentUserIp?: string;
+  currentUserAvatarUrl?: string;
   highlightMessageId?: string | null;
   onSendMessage: (peer: PeerDevice, text: string) => void;
   onSendFile: (peer: PeerDevice, file: File | { name: string; size: number; type: string; blob: Blob }) => void;
@@ -52,6 +55,9 @@ interface ChatPanelProps {
 export const ChatPanel: React.FC<ChatPanelProps> = ({
   peer,
   messages,
+  currentUserId,
+  currentUserIp,
+  currentUserAvatarUrl: _currentUserAvatarUrl,
   highlightMessageId,
   onSendMessage,
   onSendFile,
@@ -80,6 +86,17 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
 
+  // 过滤展示型消息（彻底排除 system 信令与无附件无内容的空消息）
+  const visibleMessages = useMemo(() => {
+    return messages.filter((m) => {
+      if (!m) return false;
+      if (m.msgType === 'system') return false;
+      if (m.content && m.content.startsWith('file_accept:')) return false;
+      if (!m.fileAttachment && (!m.content || !m.content.trim())) return false;
+      return true;
+    });
+  }, [messages]);
+
   // 消息吸底或定位到指定搜索到的消息
   useEffect(() => {
     if (highlightMessageId) {
@@ -93,7 +110,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     } else {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, highlightMessageId]);
+  }, [visibleMessages, highlightMessageId]);
 
   // 点击表情选择器外部自动关闭
   useEffect(() => {
@@ -228,35 +245,73 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         </div>
       )}
 
-      {/* 顶部标题栏：纯粹展示用户信息 (高度与左侧完全对齐为 h-16) */}
+      {/* 顶部标题栏：展示对端用户信息与在线/离线实时状态 (高度与左侧对齐为 h-16) */}
       <div className="h-16 px-5 border-b border-[#2b2b2b] bg-[#181818] flex items-center justify-between shrink-0">
         <div className="flex items-center space-x-3">
-          <div className="w-9 h-9 rounded-xl overflow-hidden bg-[#252526] border border-[#3c3c3c] flex items-center justify-center text-xs font-bold text-[#cccccc] shrink-0">
-            {peer.avatarUrl ? (
-              <img
-                src={peer.avatarUrl}
-                alt={peer.name}
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <span>{peer.name.slice(0, 2).toUpperCase()}</span>
-            )}
+          {/* 头像与在线状态指示点 */}
+          <div className="relative">
+            <div
+              className={`w-9 h-9 rounded-xl overflow-hidden bg-[#252526] border border-[#3c3c3c] flex items-center justify-center text-xs font-bold text-[#cccccc] shrink-0 transition-all ${
+                peer.status === 'offline' ? 'opacity-70 grayscale-[30%]' : 'opacity-100'
+              }`}
+            >
+              {peer.avatarUrl ? (
+                <img
+                  src={peer.avatarUrl}
+                  alt={peer.name}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <span>{peer.name.slice(0, 2).toUpperCase()}</span>
+              )}
+            </div>
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#181818] ${
+                peer.status === 'online'
+                  ? 'bg-[#10b981] ring-1 ring-[#10b981]/40'
+                  : 'bg-[#6e7681]'
+              }`}
+              title={peer.status === 'online' ? '当前在线' : '当前离线'}
+            />
           </div>
 
           <div>
-            <div className="text-sm font-bold text-[#e0e0e0] leading-tight">
-              {peer.name}
+            <div className="flex items-center space-x-2">
+              <span className="text-sm font-bold text-[#e0e0e0] leading-tight">
+                {peer.name}
+              </span>
+              <span
+                className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                  peer.status === 'online'
+                    ? 'text-[#10b981] bg-[#10b981]/10 border border-[#10b981]/25'
+                    : 'text-[#858585] bg-[#252526] border border-[#3c3c3c]'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full mr-1 ${
+                    peer.status === 'online' ? 'bg-[#10b981]' : 'bg-[#858585]'
+                  }`}
+                />
+                {peer.status === 'online' ? '在线' : '离线'}
+              </span>
             </div>
             <div className="text-[11px] font-mono text-[#858585] leading-tight mt-0.5">
-              {peer.ip}
+              {peer.ip ? `${peer.ip}:${peer.port || 57088}` : '局域网设备'}
             </div>
           </div>
         </div>
+
+        {peer.status === 'offline' && (
+          <div className="text-[11px] text-[#858585] bg-[#252526] px-2.5 py-1 rounded-lg border border-[#333333] hidden sm:flex items-center space-x-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#6e7681]" />
+            <span>对方已离线，新消息将在对方重新上线后同步</span>
+          </div>
+        )}
       </div>
 
       {/* 聊天记录主列表 */}
       <div className="flex-1 p-4 sm:p-5 overflow-y-auto custom-scrollbar bg-[#1e1e1e]">
-        {messages.length === 0 ? (
+        {visibleMessages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-4">
             <Radio className="w-8 h-8 text-[#4f4f4f] mb-3 animate-pulse" />
             <div className="mb-3 text-xs text-[#858585]">
@@ -266,18 +321,26 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             <DynamicTipsBanner variant="compact" />
           </div>
         ) : (
-          messages.map((msg, index) => (
-            <MessageBubble
-              key={`${msg.id}-${index}`}
-              message={msg}
-              isMe={msg.senderId !== peer.id}
-              peer={peer}
-              isHighlighted={msg.id === highlightMessageId}
-              onAcceptFile={onAcceptFile}
-              onOpenInFolder={onOpenInFolder}
-              onPreviewMedia={onPreviewMedia}
-            />
-          ))
+          visibleMessages.map((msg, index) => {
+            // 核心判定：消息发送方 ID 等于当前设备 ID 或发送方 IP 等于当前设备 IP，则为“我发出的消息”（居右）
+            // 否则为“对端发来的消息”（居左）
+            const isMe =
+              (currentUserId && msg.senderId === currentUserId) ||
+              (currentUserIp && currentUserIp !== '' && msg.senderIp === currentUserIp);
+
+            return (
+              <MessageBubble
+                key={`${msg.id}-${index}`}
+                message={msg}
+                isMe={!!isMe}
+                peer={peer}
+                isHighlighted={msg.id === highlightMessageId}
+                onAcceptFile={onAcceptFile}
+                onOpenInFolder={onOpenInFolder}
+                onPreviewMedia={onPreviewMedia}
+              />
+            );
+          })
         )}
         <div ref={messagesEndRef} />
       </div>

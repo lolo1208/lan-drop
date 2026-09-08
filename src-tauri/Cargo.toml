@@ -22,11 +22,9 @@ axum = { version = "0.7", features = ["multipart", "tokio"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
-# Reqwest 极速流式客户端 (实现磁盘直推至对端 Axum)
+# Reqwest 极速流式客户端 (实现磁盘直推至对端 Axum 与 HTTP 网段高并发探测)
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "json"] }
 
-# UDP 组播与底层 Socket 配置 (SO_REUSEADDR, 组播加入等)
-socket2 = { version = "0.5", features = ["all"] }
 local-ip-address = "0.6"
 whoami = "1.5"
 

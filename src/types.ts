@@ -11,7 +11,7 @@ export interface PeerDevice {
   avatarUrl?: string; // 用户头像 (Base64 或图片 URL)
   os: DeviceOS; // 操作系统类型
   ip: string; // 局域网 IPv4 地址
-  port: number; // Axum HTTP 服务接收端口 (默认 7890)
+  port: number; // Axum HTTP 服务接收端口 (默认 57088)
   status: 'online' | 'offline' | 'busy'; // 在线状态
   lastSeen: number; // 最后心跳时间戳 (毫秒)
   pingMs: number; // 局域网延迟 (毫秒)
@@ -73,8 +73,12 @@ export interface FileAttachmentMeta {
 export interface ChatMessage {
   id: string; // 消息ID
   peerId: string; // 会话对端设备ID
+  peerIp?: string; // 会话对端设备IP (支持 IP 级聊天对齐)
   senderId: string; // 发送方ID
   senderName: string; // 发送方名称
+  senderAvatarUrl?: string; // 发送方头像
+  senderIp?: string; // 发送方 IPv4
+  senderPort?: number; // 发送方 Port (默认 57088)
   content: string; // 文本内容（如果是纯文件消息则可为文件名或附加说明）
   msgType: 'text' | 'file' | 'image' | 'video' | 'audio' | 'system'; // 消息类型
   timestamp: number; // 发送时间
