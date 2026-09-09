@@ -9,7 +9,7 @@
  *    - 下方同一行放置：表情按钮、发送文件按钮、VS Code 标志性科技蓝发送按钮
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   ChevronDown,
@@ -53,6 +53,7 @@ interface ChatPanelProps {
   onResumeFile?: (msg: ChatMessage) => void;
   onOpenInFolder: (savedPath?: string, fileName?: string, isMedia?: boolean) => void;
   onPreviewMedia: (type: 'image' | 'video' | 'audio', url: string, fileName: string, filePath?: string) => void;
+  onMarkPeerRead?: (peerId: string) => void;
 }
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
@@ -68,6 +69,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onResumeFile,
   onOpenInFolder,
   onPreviewMedia,
+  onMarkPeerRead,
 }) => {
   const [inputText, setInputText] = useState('');
   const [isDragging, setIsDragging] = useState(false);
@@ -85,6 +87,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     return [];
   });
 
+  const dragCounterRef = useRef(0);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -134,12 +137,16 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     });
   }, [messages]);
 
-  // 1. 切换聊天对象（peer.id 变动）时：重置状态并强制滚到底部
+  // 1. 切换聊天对象（peer.id 变动）时：重置状态、标为已读并强制滚到底部
   useEffect(() => {
-    if (peer && peer.id !== prevPeerIdRef.current) {
-      prevPeerIdRef.current = peer.id;
-      lastKnownMsgIdRef.current = visibleMessages[visibleMessages.length - 1]?.id || null;
-      scrollToBottom(false);
+    if (peer && peer.id) {
+      if (peer.id !== prevPeerIdRef.current) {
+        prevPeerIdRef.current = peer.id;
+        lastKnownMsgIdRef.current = visibleMessages[visibleMessages.length - 1]?.id || null;
+        scrollToBottom(false);
+      }
+      // 触发将该联系人的消息批量标记为已读
+      onMarkPeerRead?.(peer.id);
     }
   }, [peer?.id]);
 
@@ -170,12 +177,15 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
       if (isAtBottomRef.current || isMe) {
         scrollToBottom(true);
+        if (peer?.id) {
+          onMarkPeerRead?.(peer.id);
+        }
       } else {
         setUnreadNewCount((prev) => prev + 1);
         setShowScrollBottomBtn(true);
       }
     }
-  }, [visibleMessages, highlightMessageId, currentUserId, currentUserIp]);
+  }, [visibleMessages, highlightMessageId, currentUserId, currentUserIp, peer?.id]);
 
   // 点击表情选择器外部自动关闭
   useEffect(() => {
@@ -195,6 +205,120 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [showEmojiPicker]);
+
+  // 记录近期已发送文件的特征标识与时间戳，防止 DOM drop 与 Tauri 原生事件并发重复发送同一个文件
+  const recentSentMapRef = useRef<Map<string, number>>(new Map());
+
+  const triggerSendFile = useCallback((targetPeer: PeerDevice, file: File | { name: string; size?: number; path?: string }) => {
+    if (!targetPeer || !file) return;
+
+    const fileName = file.name || 'file';
+    const fileSize = file.size || 0;
+    const filePath = (file as any).path || '';
+    const fileKey = `${targetPeer.id}_${fileName}_${fileSize}_${filePath}`;
+    const now = Date.now();
+
+    // 1500 毫秒内相同联系人+相同文件的重复请求直接拦截
+    const lastSentTime = recentSentMapRef.current.get(fileKey) || 0;
+    if (now - lastSentTime < 1500) {
+      console.log('防重复：已拦截短时间内重复触发的文件发送:', fileName);
+      return;
+    }
+
+    recentSentMapRef.current.set(fileKey, now);
+
+    // 定期清理 10 秒前的旧记录
+    for (const [k, time] of recentSentMapRef.current.entries()) {
+      if (now - time > 10000) {
+        recentSentMapRef.current.delete(k);
+      }
+    }
+
+    onSendFile(targetPeer, file as File);
+  }, [onSendFile]);
+
+  // 监听 Tauri 原生桌面端拖放文件事件 (如直接从 Windows 资源管理器/Mac Finder 拖入窗口)
+  useEffect(() => {
+    if (!peer) return;
+
+    const unlisteners: (() => void)[] = [];
+    const setupTauriDropListener = async () => {
+      if (typeof window === 'undefined') return;
+      const isTauriEnv = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
+      if (!isTauriEnv) return;
+
+      // 1. Tauri v2 官方 Window Drag & Drop 原生事件监听
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const un = await getCurrentWindow().onDragDropEvent((event) => {
+          const payload = event.payload;
+          if (payload.type === 'enter' || payload.type === 'over') {
+            setIsDragging(true);
+          } else if (payload.type === 'leave' || (payload as any).type === 'cancel') {
+            setIsDragging(false);
+            dragCounterRef.current = 0;
+          } else if (payload.type === 'drop') {
+            setIsDragging(false);
+            dragCounterRef.current = 0;
+            const paths: string[] = payload.paths || [];
+            if (paths && paths.length > 0) {
+              paths.forEach((filePath) => {
+                const fileName = filePath.split(/[/\\]/).pop() || 'file';
+                triggerSendFile(peer, {
+                  name: fileName,
+                  size: 0,
+                  type: 'application/octet-stream',
+                  blob: new Blob([]),
+                  path: filePath,
+                } as any);
+              });
+            }
+          }
+        });
+        unlisteners.push(un);
+      } catch (err) {
+        console.log('Tauri onDragDropEvent fallback to listen:', err);
+      }
+
+      // 2. 兼容 Tauri 全系列事件总线 (tauri://drop, tauri://file-drop, tauri://drag-drop)
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const events = ['tauri://drop', 'tauri://file-drop', 'tauri://drag-drop'];
+        for (const evtName of events) {
+          const un = await listen<any>(evtName, (event) => {
+            setIsDragging(false);
+            dragCounterRef.current = 0;
+            const payload = event.payload;
+            const paths: string[] = Array.isArray(payload)
+              ? payload
+              : payload?.paths || [];
+
+            if (paths && paths.length > 0) {
+              paths.forEach((filePath) => {
+                const fileName = filePath.split(/[/\\]/).pop() || 'file';
+                triggerSendFile(peer, {
+                  name: fileName,
+                  size: 0,
+                  type: 'application/octet-stream',
+                  blob: new Blob([]),
+                  path: filePath,
+                } as any);
+              });
+            }
+          });
+          unlisteners.push(un);
+        }
+      } catch (err) {
+        console.log('Tauri listen failed:', err);
+      }
+    };
+
+    setupTauriDropListener();
+
+    return () => {
+      unlisteners.forEach((fn) => fn());
+    };
+  }, [peer, triggerSendFile]);
 
   if (!peer) {
     return (
@@ -262,31 +386,112 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setShowEmojiPicker(false);
   };
 
-  // 拖拽文件进入聊天框
+  // 拖拽文件进入聊天消息列表或输入框区域
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // 校验是否包含文件类型数据（大小写不敏感且兼容各类浏览器/系统）
+    if (e.dataTransfer && e.dataTransfer.types) {
+      const types = Array.from(e.dataTransfer.types).map((t) => t.toLowerCase());
+      const hasFiles =
+        types.length === 0 ||
+        types.includes('files') ||
+        types.includes('application/x-moz-file') ||
+        types.includes('public.file-url') ||
+        types.includes('text/uri-list') ||
+        types.some((t) => t.includes('file'));
+
+      if (!hasFiles) return;
+    }
+
+    dragCounterRef.current += 1;
+    if (dragCounterRef.current === 1) {
+      setIsDragging(true);
+    }
+  };
+
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
-    setIsDragging(true);
+    e.stopPropagation();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'copy';
+    }
+    if (!isDragging) {
+      setIsDragging(true);
+    }
   };
 
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault();
-    setIsDragging(false);
+    e.stopPropagation();
+
+    dragCounterRef.current -= 1;
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0;
+      setIsDragging(false);
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current = 0;
     setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      Array.from(e.dataTransfer.files).forEach((f) => {
-        onSendFile(peer, f);
-      });
+
+    if (!peer) return;
+
+    const filesToSend: File[] = [];
+
+    // 1. 优先提取 HTML5 拖放的 FileList
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      for (let i = 0; i < e.dataTransfer.files.length; i++) {
+        const file = e.dataTransfer.files.item(i);
+        if (file) filesToSend.push(file);
+      }
+    }
+
+    // 2. 备用提取 e.dataTransfer.items
+    if (filesToSend.length === 0 && e.dataTransfer && e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      for (let i = 0; i < e.dataTransfer.items.length; i++) {
+        const item = e.dataTransfer.items[i];
+        if (item.kind === 'file') {
+          const file = item.getAsFile();
+          if (file) filesToSend.push(file);
+        }
+      }
+    }
+
+    if (filesToSend.length > 0) {
+      filesToSend.forEach((f) => triggerSendFile(peer, f));
+    }
+  };
+
+  // 支持在输入框 Ctrl+V 直接粘贴剪贴板中的文件或截图发送
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!peer) return;
+    const items = e.clipboardData?.items;
+    if (!items || items.length === 0) return;
+
+    const filesToSend: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) filesToSend.push(file);
+      }
+    }
+
+    if (filesToSend.length > 0) {
+      e.preventDefault();
+      filesToSend.forEach((f) => triggerSendFile(peer, f));
     }
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
+    if (e.target.files && peer) {
       Array.from(e.target.files).forEach((f) => {
-        onSendFile(peer, f);
+        triggerSendFile(peer, f);
       });
     }
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -295,17 +500,20 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   return (
     <div
       className="flex-1 h-full flex flex-col bg-[#1e1e1e] relative select-text"
+      onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {/* 拖拽全屏高亮遮罩 (VS Code 选区科技蓝风格) */}
+      {/* 拖拽全屏高亮遮罩 (VS Code 选区科技蓝风格，精准贴合消息列表与输入框) */}
       {isDragging && (
-        <div className="absolute inset-0 z-40 bg-[#094771]/90 backdrop-blur-xs border-2 border-dashed border-[#0078d4] flex flex-col items-center justify-center text-white pointer-events-none animate-in fade-in">
-          <UploadCloud className="w-14 h-14 text-[#38bdf8] mb-2 animate-bounce" />
-          <h4 className="text-base font-bold">释放鼠标将文件推入聊天</h4>
-          <p className="text-xs text-[#9cdcfe] mt-1">
-            将生成一条文件消息，接收方点击接收后即时写入磁盘
+        <div className="absolute inset-0 z-50 pointer-events-none bg-[#094771]/90 backdrop-blur-xs border-2 border-dashed border-[#38bdf8] flex flex-col items-center justify-center text-white cursor-copy animate-in fade-in select-none">
+          <UploadCloud className="w-16 h-16 text-[#38bdf8] mb-3 animate-bounce" />
+          <h4 className="text-base sm:text-lg font-bold text-[#f0f9ff]">
+            松开鼠标直接投送文件给 {peer.name}
+          </h4>
+          <p className="text-xs text-[#9cdcfe] mt-1.5 max-w-md text-center px-4">
+            拖动至消息列表或输入区域均可触发直接发送，文件将通过局域网流式传输
           </p>
         </div>
       )}
@@ -361,7 +569,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               </span>
             </div>
             <div className="text-[11px] font-mono text-[#858585] leading-tight mt-0.5">
-              {peer.ip ? `${peer.ip}:${peer.port || 57088}` : '局域网设备'}
+              {peer.ip || '局域网设备'}
             </div>
           </div>
         </div>
@@ -511,7 +719,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="输入消息（Enter 发送，Shift + Enter 换行），也可直接拖拽文件发送"
+            onPaste={handlePaste}
+            placeholder="输入消息（Enter 发送，Shift + Enter 换行），或直接拖拽文件/截图粘贴至此处发送"
             className="w-full bg-transparent text-xs sm:text-sm text-[#cccccc] placeholder-[#6e7681] focus:outline-none resize-none px-2 py-1 max-h-32 overflow-y-auto custom-scrollbar"
           />
         </div>

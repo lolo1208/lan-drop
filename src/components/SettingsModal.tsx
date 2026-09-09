@@ -22,6 +22,7 @@ import {
   Globe,
   HardDrive,
   Image as ImageIcon,
+  Keyboard,
   Power,
   Radio,
   RefreshCw,
@@ -94,7 +95,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [portError, setPortError] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+  const [isRecordingHotkey, setIsRecordingHotkey] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!isRecordingHotkey) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (e.key === 'Escape') {
+        setIsRecordingHotkey(false);
+        return;
+      }
+
+      const parts: string[] = [];
+      if (e.ctrlKey) parts.push('Ctrl');
+      if (e.altKey) parts.push('Alt');
+      if (e.shiftKey) parts.push('Shift');
+      if (e.metaKey) parts.push('Meta');
+
+      let keyName = e.key;
+      if (keyName === ' ') keyName = 'Space';
+      if (['Control', 'Alt', 'Shift', 'Meta'].includes(keyName)) {
+        return;
+      }
+
+      parts.push(keyName.length === 1 ? keyName.toUpperCase() : keyName);
+      const combined = parts.join('+');
+
+      setFormData((prev) => ({ ...prev, globalHotkey: combined }));
+      setIsRecordingHotkey(false);
+    };
+
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [isRecordingHotkey]);
 
   // 当打开弹窗或 defaultTab 变化时，激活指定的选项卡并同步当前真实路径
   useEffect(() => {
@@ -131,6 +170,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setPortError('端口号必须在 1024 ~ 65535 范围内');
       setTimeout(() => setPortError(null), 3000);
       return;
+    }
+    if (formData.globalHotkey !== undefined) {
+      ipc.registerGlobalHotkey(formData.globalHotkey);
     }
     onSave({
       ...formData,
@@ -185,23 +227,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  // 选择本地真实目录
+  // 选择本地真实目录（支持 C/D/E/F 盘等任意磁盘目录）
   const handleSelectDirectory = async () => {
-    // 1. 尝试使用现代浏览器 File System Access API
+    // 1. 优先调用 Tauri 原生 IPC 命令：唤起系统文件夹选择器，可自由选择 D盘、E盘、F盘等任意绝对路径
+    const selectedPath = await ipc.selectDirectory();
+    if (selectedPath) {
+      setFormData((prev) => ({ ...prev, downloadDir: selectedPath }));
+      return;
+    }
+
+    // 2. Web 环境 showDirectoryPicker 支持
     if (typeof window !== 'undefined' && 'showDirectoryPicker' in window) {
       try {
         // @ts-ignore
         const dirHandle = await window.showDirectoryPicker();
         if (dirHandle && dirHandle.name) {
-          // 拼接为合法的真实路径格式
           const isWin = typeof navigator !== 'undefined' && navigator.userAgent.includes('Win');
-          const sep = isWin ? '\\' : '/';
-          const basePath = defaultRealPath.substring(0, defaultRealPath.lastIndexOf(sep));
-          const targetPath = `${basePath}${sep}${dirHandle.name}`;
-          setFormData((prev) => ({
-            ...prev,
-            downloadDir: targetPath,
-          }));
+          const currentDir = formData.downloadDir || defaultRealPath;
+          const driveMatch = currentDir.match(/^[A-Za-z]:/);
+          const base = driveMatch ? driveMatch[0] : (isWin ? 'D:' : '');
+          const suggested = base ? `${base}\\${dirHandle.name}` : dirHandle.name;
+          const confirmed = prompt('选择的文件夹名称已获取，请输入或确认绝对保存路径：', suggested);
+          if (confirmed) {
+            setFormData((prev) => ({ ...prev, downloadDir: confirmed.trim() }));
+          }
           return;
         }
       } catch (err: any) {
@@ -209,30 +258,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     }
 
-    // 2. 尝试使用 Tauri 原生目录选择器获取系统真实绝对路径
-    if (typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window)) {
-      try {
-        // @ts-ignore
-        const tauri = window.__TAURI__;
-        if (tauri?.dialog?.open) {
-          const selected = await tauri.dialog.open({
-            directory: true,
-            multiple: false,
-            title: '选择文件保存真实目录',
-          });
-          if (selected && typeof selected === 'string') {
-            setFormData((prev) => ({ ...prev, downloadDir: selected }));
-            return;
-          }
-        }
-      } catch (err) {
-        console.warn('Tauri dialog failed:', err);
-      }
-    }
-
-    // 3. 降级提示手动输入本机真实路径
+    // 3. 降级提示用户手动输入任意盘符绝对路径
     const fallbackPath = prompt(
-      '请输入本机真实文件保存目录绝对路径：',
+      '请输入本机文件保存目录绝对路径（例如 D:\\LAN Drop\\Files 或 E:\\Downloads）：',
       formData.downloadDir || defaultRealPath
     );
     if (fallbackPath) {
@@ -607,7 +635,72 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               </div>
 
-              {/* 4. 开机启动 */}
+              {/* 4. 全局呼出快捷键 */}
+              <div className="bg-[#252526]/60 border border-[#333333] rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Keyboard className="w-4 h-4 text-[#38bdf8]" />
+                    <label className="font-semibold text-[#e0e0e0] text-sm">
+                      全局唤醒快捷键
+                    </label>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, globalHotkey: 'Ctrl+Alt+Shift+S' })}
+                      className="text-[11px] text-[#38bdf8] hover:text-[#7dd3fc] font-medium transition-colors cursor-pointer"
+                    >
+                      默认 (Ctrl+Alt+Shift+S)
+                    </button>
+                    {formData.globalHotkey && (
+                      <button
+                        type="button"
+                        onClick={() => setFormData({ ...formData, globalHotkey: '' })}
+                        className="text-[11px] text-[#858585] hover:text-rose-400 transition-colors cursor-pointer"
+                      >
+                        禁用
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      readOnly
+                      value={isRecordingHotkey ? '请在键盘上按下快捷键组合（Esc 取消）...' : (formData.globalHotkey || '未设置 (已禁用)')}
+                      onClick={() => setIsRecordingHotkey(true)}
+                      className={`w-full px-3.5 py-2 border rounded-xl text-xs font-mono font-semibold transition-all cursor-pointer ${
+                        isRecordingHotkey
+                          ? 'bg-[#1a2e3b] border-[#0078d4] text-[#38bdf8] animate-pulse ring-2 ring-[#0078d4]/40'
+                          : formData.globalHotkey
+                          ? 'bg-[#1e1e1e] border-[#3c3c3c] text-[#cccccc]'
+                          : 'bg-[#1e1e1e] border-[#3c3c3c] text-[#6e7681]'
+                      }`}
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsRecordingHotkey(!isRecordingHotkey)}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-medium transition-all shrink-0 cursor-pointer ${
+                      isRecordingHotkey
+                        ? 'bg-rose-600 hover:bg-rose-500 text-white'
+                        : 'bg-[#2d2d2d] hover:bg-[#383838] border border-[#3c3c3c] hover:border-[#0078d4] text-[#cccccc] hover:text-white'
+                    }`}
+                  >
+                    <span>{isRecordingHotkey ? '取消录制' : '录制快捷键'}</span>
+                  </button>
+                </div>
+
+                <p className="text-[11px] text-[#858585] mt-1.5 leading-relaxed">
+                  快捷键可智能切换前后台：程序在前台激活状态时按下将隐藏至托盘；处于后台或隐藏时按下将立即唤醒并恢复到前台（推荐使用 Ctrl+Alt+Shift+S 或 Alt+Space 等）。
+                </p>
+              </div>
+
+              {/* 5. 开机启动 */}
               <div className="bg-[#252526]/60 border border-[#333333] rounded-xl p-4 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Power className="w-4 h-4 text-[#38bdf8]" />

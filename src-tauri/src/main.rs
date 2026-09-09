@@ -17,6 +17,66 @@ use tauri::{
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State,
 };
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+
+fn parse_shortcut_str(s: &str) -> String {
+    let raw = s.trim().to_lowercase();
+    if raw.is_empty() {
+        return "".into();
+    }
+    let mut parts = Vec::new();
+    for p in raw.split('+') {
+        let trimmed = p.trim();
+        match trimmed {
+            "ctrl" | "control" => parts.push("ctrl"),
+            "cmd" | "command" | "meta" | "win" => parts.push("super"),
+            "alt" | "option" => parts.push("alt"),
+            "shift" => parts.push("shift"),
+            "space" => parts.push("space"),
+            _ => parts.push(trimmed),
+        }
+    }
+    parts.join("+")
+}
+
+pub fn toggle_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let is_visible = window.is_visible().unwrap_or(false);
+        let is_minimized = window.is_minimized().unwrap_or(false);
+        let is_focused = window.is_focused().unwrap_or(false);
+
+        // 如果主窗口当前处于可见、未最小化且处于聚焦前台激活状态
+        if is_visible && !is_minimized && is_focused {
+            log::info!("主窗口当前处于前台激活状态，按下快捷键隐藏至系统托盘");
+            let _ = window.hide();
+            let _ = window.set_skip_taskbar(true);
+            let _ = window.emit("app://window_hidden_to_tray", true);
+        } else {
+            log::info!("主窗口处于后台或未聚焦，按下快捷键呼出并恢复至前台");
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_skip_taskbar(false);
+            let _ = window.set_always_on_top(true);
+            let _ = window.set_focus();
+            let _ = window.set_always_on_top(false);
+            let _ = window.emit("app://restored_from_tray", ());
+            let _ = window.emit("app://window_hidden_to_tray", false);
+        }
+    }
+}
+
+pub fn wake_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_skip_taskbar(false);
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_focus();
+        let _ = window.set_always_on_top(false);
+        let _ = window.emit("app://restored_from_tray", ());
+        let _ = window.emit("app://window_hidden_to_tray", false);
+    }
+}
 use tokio::sync::RwLock;
 
 // 共享应用状态
@@ -685,6 +745,46 @@ fn set_auto_start(enabled: bool, state: State<'_, AppState>) -> Result<(), Strin
     configure_autostart(enabled)
 }
 
+#[tauri::command]
+async fn select_directory(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |folder_path| {
+        let res = folder_path.map(|p| p.to_string());
+        let _ = tx.send(res);
+    });
+    match rx.await {
+        Ok(path) => Ok(path),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn register_global_hotkey(app: AppHandle, hotkey: String, state: State<'_, AppState>) -> Result<(), String> {
+    let _ = state.db.set_kv("global_hotkey", &hotkey);
+
+    let _ = app.global_shortcut().unregister_all();
+
+    let normalized = parse_shortcut_str(&hotkey);
+    if !normalized.is_empty() {
+        match normalized.parse::<Shortcut>() {
+            Ok(shortcut) => {
+                if let Err(e) = app.global_shortcut().register(shortcut) {
+                    log::warn!("操作系统注册全局快捷键 '{}' 失败: {}", normalized, e);
+                    return Err(format!("系统全局快捷键注册失败，可能被其他程序占用: {}", e));
+                } else {
+                    log::info!("成功注册新系统 OS 级全局唤醒快捷键: {}", normalized);
+                }
+            }
+            Err(e) => {
+                log::warn!("快捷键格式解析失败: {}", e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // SQLite 数据库持久化 IPC 指令
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct AppSettingsPayload {
@@ -707,6 +807,8 @@ pub struct AppSettingsPayload {
     pub update_url: String,
     #[serde(rename = "autoStart", default)]
     pub auto_start: bool,
+    #[serde(rename = "globalHotkey", default = "default_global_hotkey")]
+    pub global_hotkey: String,
 }
 
 fn default_multicast_group() -> String {
@@ -714,6 +816,9 @@ fn default_multicast_group() -> String {
 }
 fn default_heartbeat_interval() -> u32 {
     10
+}
+fn default_global_hotkey() -> String {
+    "Ctrl+Alt+Shift+S".to_string()
 }
 
 #[tauri::command]
@@ -734,6 +839,11 @@ async fn db_get_all_settings(state: State<'_, AppState>) -> Result<AppSettingsPa
         .get("auto_start")
         .map(|s| s == "true")
         .unwrap_or(false);
+    let global_hotkey = kv_map
+        .get("global_hotkey")
+        .cloned()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Ctrl+Alt+Shift+S".to_string());
     let update_url = kv_map.get("update_url").cloned().unwrap_or_default();
     let real_doc_files_dir = dirs::document_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -771,6 +881,7 @@ async fn db_get_all_settings(state: State<'_, AppState>) -> Result<AppSettingsPa
         heartbeat_interval: 10,
         update_url,
         auto_start,
+        global_hotkey,
     })
 }
 
@@ -826,6 +937,7 @@ async fn db_save_all_settings(settings: AppSettingsPayload, state: State<'_, App
     let _ = state.db.set_kv("download_dir", &settings.download_dir);
     let _ = state.db.set_kv("auto_start", &settings.auto_start.to_string());
     let _ = state.db.set_kv("update_url", &settings.update_url);
+    let _ = state.db.set_kv("global_hotkey", &settings.global_hotkey);
 
     let _ = configure_autostart(settings.auto_start);
 
@@ -1062,6 +1174,7 @@ async fn hide_to_tray(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
         let _ = window.set_skip_taskbar(true);
+        let _ = window.emit("app://window_hidden_to_tray", true);
     }
     Ok(())
 }
@@ -1076,7 +1189,14 @@ async fn show_from_tray(app: AppHandle) -> Result<(), String> {
         let _ = window.set_focus();
         let _ = window.set_always_on_top(false);
         let _ = window.emit("app://restored_from_tray", ());
+        let _ = window.emit("app://window_hidden_to_tray", false);
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn toggle_window(app: AppHandle) -> Result<(), String> {
+    toggle_main_window(&app);
     Ok(())
 }
 
@@ -1199,6 +1319,17 @@ async fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |app, shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        log::info!("底层操作系统捕获到全局热键: {:?}", shortcut);
+                        toggle_main_window(app);
+                    }
+                })
+                .build(),
+        )
         .manage(AppState {
             db: database.clone(),
             local_device: local_state.clone(),
@@ -1323,6 +1454,22 @@ async fn main() {
                 }
             });
 
+            // 5. 注册 OS 系统级全局唤醒快捷键（默认为 "Ctrl+Alt+Shift+S"）
+            let initial_hotkey = database
+                .get_kv("global_hotkey")
+                .ok()
+                .flatten()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Ctrl+Alt+Shift+S".to_string());
+
+            let normalized = parse_shortcut_str(&initial_hotkey);
+            if !normalized.is_empty() {
+                if let Ok(shortcut) = normalized.parse::<Shortcut>() {
+                    let _ = handle.global_shortcut().register(shortcut);
+                    log::info!("系统初始化完成：成功注册 OS 系统级全局唤醒快捷键: {}", normalized);
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1342,6 +1489,8 @@ async fn main() {
             get_sys_info,
             set_download_dir,
             set_auto_start,
+            select_directory,
+            register_global_hotkey,
             send_chat_message,
             start_file_transfer,
             transfer_file_data,
@@ -1360,6 +1509,7 @@ async fn main() {
             is_window_visible,
             hide_to_tray,
             show_from_tray,
+            toggle_window,
             db_get_all_settings,
             db_save_all_settings,
             db_get_kv,

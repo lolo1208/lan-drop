@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Activity, Eye, Monitor } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { ChatPanel } from './components/ChatPanel';
 import { MediaLightbox } from './components/MediaLightbox';
@@ -6,7 +7,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { Sidebar } from './components/Sidebar';
 import { conversationManager } from './services/conversationManager';
 import { ipc, isTauri } from './services/ipc';
-import { storageService } from './services/storage';
+import { getDefaultDocumentsPath, getDefaultMachineName, setDefaultDocumentsCache, storageService } from './services/storage';
 import {
   ChatMessage,
   LocalDeviceConfig,
@@ -60,6 +61,13 @@ export function App() {
   const [settingsDefaultTab, setSettingsDefaultTab] = useState<'user' | 'system'>('user');
   const [folderToast, setFolderToast] = useState<string | null>(null);
   const [highlightMessageId, setHighlightMessageId] = useState<string | null>(null);
+  const [isHiddenToTray, setIsHiddenToTray] = useState(false);
+
+  // 始终维护最新的 config 引用，避免 keydown 闭包陷阱
+  const configRef = useRef<LocalDeviceConfig>(config);
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
 
   // 媒体大图/视频/音频预览弹窗
   const [lightbox, setLightbox] = useState<{
@@ -81,6 +89,38 @@ export function App() {
   const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notifiedMsgIdsRef = useRef<Set<string>>(new Set());
 
+  const selectedPeerRef = useRef<PeerDevice | null>(selectedPeer);
+  useEffect(() => {
+    selectedPeerRef.current = selectedPeer;
+  }, [selectedPeer]);
+
+  // 标记单个联系人的消息为已读并发送局域网已读回执
+  const handleMarkPeerRead = useCallback(async (peerId: string) => {
+    if (!peerId) return;
+
+    let hasStateUnread = false;
+    setAllChats((prev) => {
+      hasStateUnread = prev.some(
+        (m) => (m.peerId === peerId || m.senderId === peerId) && m.senderId !== config.id && !m.isRead
+      );
+      if (!hasStateUnread) return prev;
+      return prev.map((m) => {
+        if ((m.peerId === peerId || m.senderId === peerId) && m.senderId !== config.id && !m.isRead) {
+          return { ...m, isRead: true, readTimestamp: Date.now() };
+        }
+        return m;
+      });
+    });
+
+    const updatedDbCount = await storageService.markPeerMessagesAsRead(peerId, config.id);
+
+    // 仅当确实存在未读消息被标记为已读时，才触发局域网已读回执网络请求
+    if (hasStateUnread || updatedDbCount > 0) {
+      const targetPeer = peers.find((p) => p.id === peerId) || peerId;
+      conversationManager.sendReadReceipt(targetPeer);
+    }
+  }, [config.id, peers]);
+
   // 辅助函数：触发消息临时高亮框并在2.5秒后自动淡出消失
   const triggerMessageHighlight = (msgId: string) => {
     if (highlightTimeoutRef.current) {
@@ -91,6 +131,27 @@ export function App() {
       setHighlightMessageId((curr) => (curr === msgId ? null : curr));
     }, 2500);
   };
+
+  // 全局阻止浏览器拖拽本地文件的默认打开/导航行为
+  useEffect(() => {
+    const handleGlobalDragOver = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'copy';
+      }
+    };
+    const handleGlobalDrop = (e: DragEvent) => {
+      e.preventDefault();
+    };
+
+    window.addEventListener('dragover', handleGlobalDragOver);
+    window.addEventListener('drop', handleGlobalDrop);
+
+    return () => {
+      window.removeEventListener('dragover', handleGlobalDragOver);
+      window.removeEventListener('drop', handleGlobalDrop);
+    };
+  }, []);
 
   // 1. 初始化 IPC 监听与配置读取
   useEffect(() => {
@@ -111,24 +172,37 @@ export function App() {
       }
     });
 
-    // 在 Tauri 环境下读取真实的系统文档路径与 IP，补充必要缺省字段
+    // 在 Tauri 环境下读取真实的系统文档路径与计算机名，同步与修正配置
     ipc.getSysInfo().then((sysInfo) => {
       if (sysInfo) {
+        if (sysInfo.document_dir) {
+          setDefaultDocumentsCache(sysInfo.document_dir);
+        }
         const current = ipc.getLocalConfig();
         const newConfig = { ...current };
         let changed = false;
-        if (!newConfig.name) {
-          newConfig.name = sysInfo.hostname;
-          changed = true;
+
+        // 若当前名称为通用默认名称（Windows PC / My Computer / LAN Drop Device 或空），自动更新修正为真实的 sysInfo.hostname
+        if (!newConfig.name || newConfig.name === 'Windows PC' || newConfig.name === 'My Computer' || newConfig.name === 'LAN Drop Device') {
+          if (sysInfo.hostname) {
+            newConfig.name = sysInfo.hostname;
+            changed = true;
+          }
         }
+
+        // 若路径包含占位符或为硬编码 C 盘默认，自动更新修正为真实 [用户文档]\LAN Drop\Files
         if (
           !newConfig.downloadDir ||
           newConfig.downloadDir.includes('[用户文档]') ||
+          newConfig.downloadDir === 'C:\\LAN Drop\\Files' ||
           newConfig.downloadDir === '~/Downloads/FlashDrop'
         ) {
-          newConfig.downloadDir = sysInfo.document_dir;
-          changed = true;
+          if (sysInfo.document_dir) {
+            newConfig.downloadDir = sysInfo.document_dir;
+            changed = true;
+          }
         }
+
         if (sysInfo.local_ip && sysInfo.local_ip !== '127.0.0.1' && sysInfo.local_ip !== '0.0.0.0' && !newConfig.ip) {
           newConfig.ip = sysInfo.local_ip;
           changed = true;
@@ -288,10 +362,11 @@ export function App() {
       setAllChats((prev) => upsertMessage(prev, msg));
       notifyIncomingMessage(msg);
 
-      // 若当前未选中任何联系人，且收到来自对端的消息，自动聚焦至该联系人
-      setSelectedPeer((curr) => {
-        if (!curr && msg.senderId !== config.id) {
-          return {
+      // 仅当为对端发来的普通消息（非系统信令），且用户当前处于与该联系人的聊天窗口中，才尝试自动标记已读
+      if (msg && msg.msgType !== 'system' && isDisplayableMessage(msg) && msg.senderId && msg.senderId !== config.id) {
+        const curr = selectedPeerRef.current;
+        if (!curr) {
+          const newPeer: PeerDevice = {
             id: msg.senderId,
             name: msg.senderName || '局域网设备',
             ip: (msg as any).senderIp || msg.fileAttachment?.senderIp || '',
@@ -303,9 +378,12 @@ export function App() {
             pingMs: 1.0,
             version: '2.0.0',
           };
+          setSelectedPeer(newPeer);
+          handleMarkPeerRead(msg.senderId);
+        } else if (curr.id === msg.senderId || ((msg as any).senderIp && curr.ip === (msg as any).senderIp)) {
+          handleMarkPeerRead(msg.senderId);
         }
-        return curr;
-      });
+      }
     });
 
     // 监听接收端流式接收实时进度 (收件方)
@@ -404,11 +482,63 @@ export function App() {
 
     // 监听窗口从托盘唤醒恢复事件，自动定位至最新发信联系人与消息
     const unsubRestore = ipc.on('app://restored_from_tray', () => {
+      setIsHiddenToTray(false);
       if (latestBackgroundMsgRef.current) {
         focusPeerAndMessage(latestBackgroundMsgRef.current);
         latestBackgroundMsgRef.current = null;
       }
     });
+
+    // 监听底层与 Web 模拟托盘状态变化
+    const unsubTrayState = ipc.on<boolean>('app://window_hidden_to_tray', (hidden) => {
+      setIsHiddenToTray(!!hidden);
+    });
+
+    // 全局组合热键监听（如 Ctrl+Alt+Shift+S / Cmd+Alt+Shift+S / Alt+Space）呼出/隐藏前台窗口
+    const handleGlobalHotkeyPress = async (e: KeyboardEvent) => {
+      const activeHotkey = configRef.current?.globalHotkey || ipc.getLocalConfig().globalHotkey || 'Ctrl+Alt+Shift+S';
+      if (!activeHotkey) return;
+
+      const parts = activeHotkey.split('+').map((s) => s.trim().toLowerCase());
+      const needsCtrlOrCmd = parts.includes('ctrl') || parts.includes('cmd') || parts.includes('meta') || parts.includes('control');
+      const needsAlt = parts.includes('alt') || parts.includes('option');
+      const needsShift = parts.includes('shift');
+
+      const targetKey = parts.find(
+        (p) => !['ctrl', 'cmd', 'meta', 'control', 'alt', 'option', 'shift'].includes(p)
+      );
+
+      if (!targetKey) return;
+
+      let keyMatch = false;
+      const pressedKey = e.key.toLowerCase();
+      const pressedCode = e.code ? e.code.toLowerCase() : '';
+
+      if (targetKey === 'space' && (pressedCode === 'space' || e.key === ' ' || pressedKey === 'space')) {
+        keyMatch = true;
+      } else if (targetKey === 's' && (pressedKey === 's' || pressedCode === 'keys')) {
+        keyMatch = true;
+      } else if (
+        pressedKey === targetKey ||
+        pressedCode === `key${targetKey}` ||
+        pressedCode === `digit${targetKey}` ||
+        pressedCode === targetKey
+      ) {
+        keyMatch = true;
+      }
+
+      const hasCtrlOrCmd = e.ctrlKey || e.metaKey;
+      const ctrlMatch = needsCtrlOrCmd ? hasCtrlOrCmd : !hasCtrlOrCmd;
+      const altMatch = needsAlt ? e.altKey : !e.altKey;
+      const shiftMatch = needsShift ? e.shiftKey : !e.shiftKey;
+
+      if (keyMatch && ctrlMatch && altMatch && shiftMatch) {
+        e.preventDefault();
+        e.stopPropagation();
+        // 在程序已经是激活（前台显示）状态下，快捷键的功能变为：隐藏程序，只保留任务栏的小图标（托盘）
+        await ipc.toggleWindow();
+      }
+    };
 
     const handleWindowFocus = () => {
       if (latestBackgroundMsgRef.current) {
@@ -416,14 +546,17 @@ export function App() {
         latestBackgroundMsgRef.current = null;
       }
     };
+    window.addEventListener('keydown', handleGlobalHotkeyPress, true);
     window.addEventListener('focus', handleWindowFocus);
 
     return () => {
       if (highlightTimeoutRef.current) {
         clearTimeout(highlightTimeoutRef.current);
       }
+      window.removeEventListener('keydown', handleGlobalHotkeyPress, true);
       window.removeEventListener('focus', handleWindowFocus);
       unsubRestore();
+      unsubTrayState();
       unsubConfig();
       unsubPeers();
       unsubChat();
@@ -573,7 +706,14 @@ export function App() {
         if (timeB !== timeA) {
           return timeB - timeA;
         }
-        return (b.peer.lastSeen || 0) - (a.peer.lastSeen || 0);
+        // 在线状态优先（在线在前，离线在后）
+        if (a.peer.status !== b.peer.status) {
+          return a.peer.status === 'online' ? -1 : 1;
+        }
+        // 未联系过的联系人使用名称/ID固定排序，避免心跳包刷新 lastSeen 导致列表上下跳动
+        const nameCompare = a.peer.name.localeCompare(b.peer.name, 'zh-CN');
+        if (nameCompare !== 0) return nameCompare;
+        return a.peer.id.localeCompare(b.peer.id);
       });
   }, [peers, allChats, config.id, config.ip, config.name]);
 
@@ -696,6 +836,7 @@ export function App() {
         conversations={conversations}
         allChats={allChats}
         activePeerId={selectedPeer?.id || null}
+        currentUserId={config.id}
         onSelectPeer={handleSelectPeer}
         onOpenSettings={handleOpenSettingsModal}
         localName={config.name}
@@ -718,6 +859,7 @@ export function App() {
           onResumeFile={handleResumeFile}
           onOpenInFolder={handleOpenInFolder}
           onPreviewMedia={handlePreviewMedia}
+          onMarkPeerRead={handleMarkPeerRead}
         />
       </div>
 
@@ -740,6 +882,59 @@ export function App() {
         onOpenInFolder={handleOpenInFolder}
         onClose={() => setLightbox((prev) => ({ ...prev, isOpen: false }))}
       />
+
+      {/* 托盘后台挂起状态蒙层（Web预览与无缝唤出指示） */}
+      {isHiddenToTray && (
+        <div className="fixed inset-0 z-[100] bg-[#121212]/95 backdrop-blur-md flex flex-col items-center justify-center p-6 select-none animate-in fade-in duration-200">
+          <div className="bg-[#252526] border border-[#3c3c3c] rounded-2xl p-6 max-w-sm w-full shadow-2xl flex flex-col items-center text-center">
+            <div className="relative mb-3.5">
+              <div className="w-14 h-14 rounded-2xl bg-[#1e1e1e] border border-[#0078d4]/40 flex items-center justify-center text-[#0078d4] shadow-inner">
+                <Activity className="w-7 h-7 text-[#0078d4]" />
+              </div>
+              <span className="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full bg-emerald-500 border-2 border-[#252526]" />
+            </div>
+            <h3 className="text-base font-semibold text-[#f0f0f0]">LAN Drop 已隐藏至系统托盘</h3>
+            <p className="text-xs text-[#858585] mt-1.5 leading-relaxed">
+              程序正在后台静默运行中，随时可接收局域网文件与通知。
+            </p>
+            <div className="mt-4 px-3 py-1.5 bg-[#1e1e1e] border border-[#3c3c3c] rounded-lg text-xs text-[#9cdcfe] font-mono flex items-center space-x-1.5">
+              <span>按</span>
+              <kbd className="px-1.5 py-0.5 bg-[#2d2d2d] rounded text-[11px] text-white font-bold">{configRef.current?.globalHotkey || 'Ctrl+Alt+Shift+S'}</kbd>
+              <span>可重新呼出主窗口</span>
+            </div>
+            <div className="mt-5 flex items-center space-x-3 w-full">
+              <button
+                type="button"
+                onClick={() => ipc.showFromTray()}
+                className="flex-1 py-2 px-3 bg-[#0078d4] hover:bg-[#006cbd] active:scale-98 text-white text-xs font-medium rounded-lg transition-all shadow-md cursor-pointer flex items-center justify-center space-x-1.5"
+              >
+                <Eye className="w-3.5 h-3.5 mr-1" />
+                <span>恢复显示主界面</span>
+              </button>
+            </div>
+          </div>
+
+          {/* 任务栏系统托盘角标 */}
+          <div
+            onClick={() => ipc.showFromTray()}
+            title="点击唤醒 LAN Drop 主界面"
+            className="fixed bottom-4 right-4 bg-[#252526] hover:bg-[#2d2d2d] border border-[#0078d4] rounded-xl px-3.5 py-2 shadow-2xl flex items-center space-x-2.5 cursor-pointer transition-all hover:scale-105 active:scale-95 group"
+          >
+            <div className="w-6 h-6 rounded-lg bg-[#0078d4]/20 flex items-center justify-center text-[#0078d4]">
+              <Activity className="w-3.5 h-3.5" />
+            </div>
+            <div className="text-left">
+              <div className="text-xs font-medium text-[#e0e0e0] flex items-center space-x-1.5">
+                <span>LAN Drop</span>
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              </div>
+              <div className="text-[10px] text-[#858585] group-hover:text-[#9cdcfe]">
+                已常驻后台 · 点击恢复
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

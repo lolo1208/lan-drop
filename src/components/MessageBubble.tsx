@@ -15,6 +15,8 @@
 import React, { useState, useEffect } from 'react';
 import {
   AlertCircle,
+  Check,
+  CheckCheck,
   CheckCircle2,
   Clock,
   Download,
@@ -261,11 +263,27 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           : 'p-0 ring-0 bg-transparent shadow-none'
       }`}
     >
-      {/* 消息时间与发送人 */}
+      {/* 消息时间与发送人、已读/未读状态 */}
       <div className="flex items-center space-x-1.5 text-[11px] text-[#858585] mb-1 px-1">
         <span>{isMe ? '我' : message.senderName}</span>
         <span>•</span>
         <span>{formatTime(message.timestamp)}</span>
+        {isMe && (
+          <>
+            <span>•</span>
+            {message.isRead ? (
+              <span className="text-[10px] text-[#38bdf8] font-medium flex items-center gap-0.5" title="对方已阅读">
+                <CheckCheck className="w-3 h-3 text-[#38bdf8]" />
+                已读
+              </span>
+            ) : (
+              <span className="text-[10px] text-[#858585] font-medium flex items-center gap-0.5" title="对方未阅读">
+                <Check className="w-3 h-3 text-[#858585]" />
+                未读
+              </span>
+            )}
+          </>
+        )}
       </div>
 
       {/* 离线警告 Toast */}

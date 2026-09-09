@@ -18,6 +18,7 @@ class IPCService {
   private broadcastChannel: BroadcastChannel | null = null;
   private virtualPeers: PeerDevice[] = [];
   private activeSimulations: Map<string, number> = new Map();
+  private webHiddenToTray: boolean = false;
 
   private initPromise: Promise<void> | null = null;
 
@@ -94,6 +95,34 @@ class IPCService {
         await invoke('set_auto_start', { enabled });
       } catch (e) {
         console.warn('调用 set_auto_start 失败:', e);
+      }
+    }
+  }
+
+  async selectDirectory(): Promise<string | null> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const folder = await invoke<string | null>('select_directory');
+        if (folder) return folder;
+      } catch (e) {
+        console.warn('调用 select_directory 失败:', e);
+      }
+    }
+    return null;
+  }
+
+  async registerGlobalHotkey(hotkey: string): Promise<void> {
+    this.localConfig.globalHotkey = hotkey;
+    storageService.saveSettings(this.localConfig);
+    this.emit('config://updated', this.localConfig);
+
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('register_global_hotkey', { hotkey });
+      } catch (e) {
+        console.warn('调用 register_global_hotkey 失败:', e);
       }
     }
   }
@@ -400,6 +429,11 @@ class IPCService {
         this.emit('transfer://incoming_error', event.payload);
       });
 
+      // 监听底层原生快捷键/系统托盘发来的窗口切换指令
+      await safeListen('app://toggle_window', async () => {
+        await this.toggleWindow();
+      });
+
       // 2. 定期检测设备在线状态 (超过 25 秒未收到心跳则标记离线)
       setInterval(() => {
         const now = Date.now();
@@ -545,6 +579,9 @@ class IPCService {
                   folder,
                   destName,
                 });
+                return;
+              } else if (incoming.content.startsWith('read_receipt')) {
+                this.emit('chat://received', incoming);
                 return;
               }
             }
@@ -711,6 +748,26 @@ class IPCService {
 
   // 模拟对方设备通过 Axum HTTP 发送回执消息 (Web 演示)
   private async simulatePeerReply(peer: PeerDevice, userText: string) {
+    // 1. 模拟对方“已阅读”用户发出的消息：将用户发给该 peer 的所有未读消息标记为已读，并通知前端
+    try {
+      const allMessages = await storageService.getChatMessages(peer.id);
+      let updatedRead = false;
+      for (const m of allMessages) {
+        if (m.senderId === this.localConfig.id && !m.isRead) {
+          m.isRead = true;
+          m.readTimestamp = Date.now();
+          await storageService.saveChatMessage(m);
+          this.emit('chat://updated', m);
+          updatedRead = true;
+        }
+      }
+      if (updatedRead) {
+        this.emit('chat://read_status_changed', { peerId: peer.id });
+      }
+    } catch {
+      // ignore
+    }
+
     const replies: Record<string, string[]> = {
       default: [
         `[${peer.name} 已通过 Axum HTTP 接收]: 收到你的消息，局域网连接通畅！`,
@@ -875,16 +932,27 @@ class IPCService {
   }
   // 判断窗口当前是否处于激活/前台可见状态（如果被关闭隐藏至托盘或最小化则返回 false）
   async isWindowActive(): Promise<boolean> {
+    if (this.webHiddenToTray) {
+      return false;
+    }
     if (isTauri()) {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const active = await invoke<boolean>('is_window_visible');
-        return !!active;
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const appWindow = getCurrentWindow();
+        const isVisible = await appWindow.isVisible();
+        const isMinimized = await appWindow.isMinimized();
+        return isVisible && !isMinimized;
       } catch {
-        return !document.hidden;
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          const active = await invoke<boolean>('is_window_visible');
+          return !!active;
+        } catch {
+          return !document.hidden;
+        }
       }
     }
-    return !document.hidden && document.hasFocus();
+    return !this.webHiddenToTray && !document.hidden;
   }
 
   // 请求系统通知权限
@@ -937,27 +1005,71 @@ class IPCService {
     }
   }
 
-  // 隐藏窗口到任务栏系统托盘（在任务栏程序条中不再显示）
+  // 隐藏窗口到任务栏系统托盘（在任务栏程序条中不再显示，只保留系统托盘小图标）
   async hideToTray(): Promise<void> {
+    this.webHiddenToTray = true;
+    this.emit('app://window_hidden_to_tray', true);
+    this.emit('app://window_state_changed', { visible: false });
+
     if (isTauri()) {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const appWindow = getCurrentWindow();
+        await appWindow.hide();
+      } catch (err) {
+        console.warn('Tauri appWindow.hide 异常:', err);
+      }
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('hide_to_tray');
       } catch (err) {
-        console.warn('隐藏至托盘失败:', err);
+        console.warn('Tauri invoke hide_to_tray 异常:', err);
       }
     }
   }
 
   // 从托盘唤醒并恢复窗口显示
   async showFromTray(): Promise<void> {
+    this.webHiddenToTray = false;
+    this.emit('app://window_hidden_to_tray', false);
+    this.emit('app://window_state_changed', { visible: true });
+    this.emit('app://restored_from_tray', null);
+
     if (isTauri()) {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const appWindow = getCurrentWindow();
+        await appWindow.show();
+        await appWindow.unminimize();
+        await appWindow.setFocus();
+      } catch (err) {
+        console.warn('Tauri appWindow.show 异常:', err);
+      }
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('show_from_tray');
       } catch (err) {
-        console.warn('从托盘恢复窗口失败:', err);
+        console.warn('Tauri invoke show_from_tray 异常:', err);
       }
+    }
+  }
+
+  // 切换窗口激活/隐藏状态：前台激活状态下隐藏程序只保留托盘图标，非激活/隐藏状态下恢复显示到前台
+  async toggleWindow(): Promise<void> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('toggle_window');
+        return;
+      } catch (err) {
+        console.warn('invoke toggle_window 异常，回退到前端状态判断:', err);
+      }
+    }
+    const isActive = await this.isWindowActive();
+    if (isActive) {
+      await this.hideToTray();
+    } else {
+      await this.showFromTray();
     }
   }
 

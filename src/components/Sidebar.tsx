@@ -31,6 +31,7 @@ interface SidebarProps {
   conversations: PeerConversation[];
   allChats: ChatMessage[];
   activePeerId: string | null;
+  currentUserId?: string;
   onSelectPeer: (peer: PeerDevice, targetMessageId?: string) => void;
   onOpenSettings: (defaultTab?: 'user' | 'system') => void;
   localName: string;
@@ -42,6 +43,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   conversations,
   allChats,
   activePeerId,
+  currentUserId,
   onSelectPeer,
   onOpenSettings,
   localName,
@@ -101,7 +103,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
         if (timeB !== timeA) {
           return timeB - timeA; // 聊天时间越近越靠前
         }
-        return (b.peer.lastSeen || 0) - (a.peer.lastSeen || 0);
+        // 在线状态优先（在线在前，离线在后）
+        if (a.peer.status !== b.peer.status) {
+          return a.peer.status === 'online' ? -1 : 1;
+        }
+        // 未联系过的联系人使用名称/ID固定排序，避免心跳包刷新 lastSeen 导致列表上下跳动
+        const nameCompare = a.peer.name.localeCompare(b.peer.name, 'zh-CN');
+        if (nameCompare !== 0) return nameCompare;
+        return a.peer.id.localeCompare(b.peer.id);
       });
   }, [conversations, search]);
 
@@ -301,6 +310,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           filteredConversations.map(({ peer, lastMessage }) => {
             const isSelected = activePeerId === peer.id;
 
+            // 计算与该联系人的未读消息总数
+            const unreadCount = allChats.filter(
+              (m) =>
+                (m.peerId === peer.id || m.senderId === peer.id) &&
+                m.senderId !== currentUserId &&
+                !m.isRead
+            ).length;
+
             return (
               <div
                 key={peer.id}
@@ -341,7 +358,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   />
                 </div>
 
-                {/* 用户信息：名称 + 离线徽章 + 最近消息 */}
+                {/* 用户信息：名称 + 离线徽章 + 最近消息 + 未读数 */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-1.5 min-w-0 pr-1">
@@ -367,8 +384,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </span>
                   </div>
 
-                  <div className="mt-1 text-[11px]">
-                    <span className="text-[#858585] truncate block group-hover:text-[#a0a0a0]">
+                  <div className="mt-1 text-[11px] flex items-center justify-between">
+                    <span className="text-[#858585] truncate block group-hover:text-[#a0a0a0] flex-1 mr-1">
                       {lastMessage
                         ? lastMessage.msgType === 'file'
                           ? `[文件] ${lastMessage.content}`
@@ -381,6 +398,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           : lastMessage.content
                         : peer.ip}
                     </span>
+
+                    {/* 未读消息数量 Badge */}
+                    {unreadCount > 0 && (
+                      <span className="shrink-0 px-1.5 py-0.2 text-[10px] font-bold bg-[#0078d4] text-white rounded-full min-w-[18px] text-center shadow-xs animate-pulse">
+                        {unreadCount > 99 ? '99+' : unreadCount}
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>

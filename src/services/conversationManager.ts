@@ -394,11 +394,55 @@ class ConversationManager {
     ipc.emit('chat://updated', msg);
   }
 
+  // 发送局域网已读回执信令给对端，通知对方我已阅读消息
+  async sendReadReceipt(targetPeer: PeerDevice | string): Promise<void> {
+    const local = ipc.getLocalConfig();
+    const peerId = typeof targetPeer === 'string' ? targetPeer : targetPeer.id;
+    const receiptMsg: ChatMessage = {
+      id: 'receipt-' + Math.random().toString(36).substring(2, 10),
+      peerId,
+      senderId: local.id,
+      senderName: local.name,
+      content: 'read_receipt:all',
+      msgType: 'system',
+      timestamp: Date.now(),
+      status: 'delivered',
+    };
+    try {
+      await ipc.sendChatMessage(targetPeer, receiptMsg);
+    } catch {
+      // ignore read receipt network failure
+    }
+  }
+
   // 初始化监听：当作为发送端收到接收方的 file_accept 时，触发流式上传
   private initFileTransferListeners() {
-    // 监听接收到的新聊天消息：如果是图片/音频/视频，自动接收并保存至 [用户文档]/LAN Drop/Media 目录中
+    // 监听接收到的消息（包含常规消息与系统已读回执信令）
     ipc.on<ChatMessage>('chat://received', async (msg) => {
-      if (!msg || !msg.fileAttachment) return;
+      if (!msg) return;
+
+      // 监听已读回执信令：当对端告知已读时，将本端发给对端的消息更新为已读
+      if (msg.msgType === 'system' && msg.content && msg.content.startsWith('read_receipt')) {
+        const local = ipc.getLocalConfig();
+        const peerId = msg.senderId; // 谁发来的回执，就是谁阅读了我的消息
+        const messages = await storageService.getChatMessages(peerId);
+        let updatedCount = 0;
+        for (const m of messages) {
+          if (m.senderId === local.id && !m.isRead) {
+            m.isRead = true;
+            m.readTimestamp = Date.now();
+            await storageService.saveChatMessage(m);
+            updatedCount++;
+            ipc.emit('chat://updated', m);
+          }
+        }
+        if (updatedCount > 0) {
+          ipc.emit('chat://read_status_changed', { peerId });
+        }
+        return;
+      }
+
+      if (!msg.fileAttachment) return;
       const isMedia = msg.msgType === 'image' || msg.msgType === 'video' || msg.msgType === 'audio' || msg.fileAttachment.isMedia;
       if (!isMedia) return;
 

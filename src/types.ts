@@ -88,6 +88,8 @@ export interface ChatMessage {
   timestamp: number; // 发送时间
   status: 'sending' | 'sent' | 'delivered' | 'failed'; // 状态
   fileAttachment?: FileAttachmentMeta;
+  isRead?: boolean; // 消息是否已读
+  readTimestamp?: number; // 已读时间戳
 }
 
 export interface PeerConversation {
@@ -111,6 +113,7 @@ export interface LocalDeviceConfig {
   heartbeatInterval: number; // 心跳广播间隔 (秒)
   updateUrl?: string; // 系统更新地址（局域网 url，启动时检查，存在新版本时自动更新）
   autoStart?: boolean; // 开机启动（开关，默认关闭）
+  globalHotkey?: string; // 全局呼出唤醒快捷键 (如 'Alt+Space')
 }
 
 export interface RustCodeSnippet {

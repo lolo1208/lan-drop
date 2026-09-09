@@ -8,30 +8,20 @@ import { getRandomAvatarId, toCompactAvatarIdentifier, resolveAvatarUrl } from '
 import { isTauri } from '../utils/tauri';
 
 export function getDefaultMachineName(): string {
-  if (typeof navigator === 'undefined') return 'My Computer';
-  const ua = navigator.userAgent;
-  if (ua.includes('Mac')) return 'MacBook Pro';
-  if (ua.includes('Win')) return 'Windows PC';
-  if (ua.includes('Linux')) return 'Linux Workstation';
-  if (ua.includes('iPhone')) return 'iPhone';
-  if (ua.includes('iPad')) return 'iPad';
-  if (ua.includes('Android')) return 'Android Phone';
-  return 'Personal Computer';
+  return 'LAN Drop Device';
 }
 
 let cachedRealDocDir: string = '';
 
+export function setDefaultDocumentsCache(path: string) {
+  if (path && !path.includes('[用户文档]')) {
+    cachedRealDocDir = path;
+  }
+}
+
 export function getDefaultDocumentsPath(): string {
   if (cachedRealDocDir) return cachedRealDocDir;
-  if (typeof navigator === 'undefined') return '[用户文档]/LAN Drop/Files';
-  const ua = navigator.userAgent;
-  if (ua.includes('Win')) {
-    return 'C:\\LAN Drop\\Files';
-  }
-  if (ua.includes('Mac')) {
-    return '/Users/Shared/LAN Drop/Files';
-  }
-  return '/tmp/LAN Drop/Files';
+  return '[用户文档]/LAN Drop/Files';
 }
 
 /**
@@ -258,7 +248,9 @@ class LocalStorageService {
         const index = store.index('peerId');
         const request = index.getAll(peerId);
         request.onsuccess = () => {
-          const list: ChatMessage[] = request.result || [];
+          const list: ChatMessage[] = (request.result || []).filter(
+            (m) => m.peerId === peerId || m.senderId === peerId
+          );
           list.sort((a, b) => a.timestamp - b.timestamp);
           resolve(list);
         };
@@ -318,6 +310,26 @@ class LocalStorageService {
     return list;
   }
 
+  async markPeerMessagesAsRead(peerId: string, currentUserId: string): Promise<number> {
+    try {
+      const messages = await this.getChatMessages(peerId);
+      const unreadMsgs = messages.filter(
+        (m) => (m.peerId === peerId || m.senderId === peerId) && m.senderId !== currentUserId && !m.isRead
+      );
+      if (unreadMsgs.length === 0) return 0;
+
+      for (const m of unreadMsgs) {
+        m.isRead = true;
+        m.readTimestamp = Date.now();
+        await this.saveChatMessage(m);
+      }
+      return unreadMsgs.length;
+    } catch (e) {
+      console.warn('批量标记已读失败:', e);
+      return 0;
+    }
+  }
+
   async clearChat(peerId: string): Promise<void> {
     try {
       const db = await this.getDb();
@@ -358,14 +370,15 @@ class LocalStorageService {
 
           const formatted: LocalDeviceConfig = {
             id: dbSettings.id,
-            name: dbSettings.name || getDefaultMachineName(),
+            name: dbSettings.name && dbSettings.name !== 'Windows PC' && dbSettings.name !== 'My Computer' ? dbSettings.name : (dbSettings.name || getDefaultMachineName()),
             avatarUrl,
             os: dbSettings.os || 'windows',
             ip: dbSettings.ip || '',
             port: dbSettings.port || 57088,
-            downloadDir: dbSettings.downloadDir || getDefaultDocumentsPath(),
+            downloadDir: dbSettings.downloadDir && !dbSettings.downloadDir.includes('C:\\LAN Drop\\Files') ? dbSettings.downloadDir : getDefaultDocumentsPath(),
             autoStart: dbSettings.autoStart !== undefined ? dbSettings.autoStart : false,
             updateUrl: dbSettings.updateUrl || '',
+            globalHotkey: (dbSettings as any).globalHotkey || 'Ctrl+Alt+Shift+S',
             multicastGroup: '239.255.42.99:7432',
             autoAccept: false,
             heartbeatInterval: 10,
@@ -406,6 +419,7 @@ class LocalStorageService {
       avatarUrl: randomAvatar,
       downloadDir: defaultPath,
       autoStart: false,
+      globalHotkey: 'Ctrl+Alt+Shift+S',
       updateUrl: '',
       multicastGroup: '239.255.42.99:7432',
       autoAccept: false,
@@ -497,6 +511,7 @@ class LocalStorageService {
             heartbeatInterval: updatedConfig.heartbeatInterval || 10,
             updateUrl: updatedConfig.updateUrl || '',
             autoStart: updatedConfig.autoStart !== undefined ? updatedConfig.autoStart : false,
+            globalHotkey: updatedConfig.globalHotkey || 'Alt+Space',
           },
         }).catch((err) => {
           console.warn('保存设置到 SQLite .db 失败:', err);
