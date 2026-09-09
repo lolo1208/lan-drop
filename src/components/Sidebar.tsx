@@ -25,6 +25,7 @@ import {
 import { ChatMessage, PeerConversation, PeerDevice } from '../types';
 import { formatBytes, formatRelativeTime } from '../utils/format';
 import { ipc } from '../services/ipc';
+import { resolveAvatarUrl } from '../utils/avatars';
 
 interface SidebarProps {
   conversations: PeerConversation[];
@@ -161,7 +162,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="w-9 h-9 rounded-xl overflow-hidden bg-[#252526] border border-[#3c3c3c] flex items-center justify-center text-white font-bold text-sm shadow-xs group-hover:border-[#555555] transition-all">
               {localAvatarUrl ? (
                 <img
-                  src={localAvatarUrl}
+                  src={resolveAvatarUrl(localAvatarUrl)}
                   alt={localName}
                   className="w-full h-full object-cover"
                 />
@@ -320,7 +321,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   >
                     {peer.avatarUrl ? (
                       <img
-                        src={peer.avatarUrl}
+                        src={resolveAvatarUrl(peer.avatarUrl)}
                         alt={peer.name}
                         className="w-full h-full object-cover"
                       />

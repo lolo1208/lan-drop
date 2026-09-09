@@ -22,6 +22,7 @@ import {
 import { ChatMessage, PeerDevice } from '../types';
 import { MessageBubble } from './MessageBubble';
 import { DynamicTipsBanner } from './DynamicTipsBanner';
+import { resolveAvatarUrl } from '../utils/avatars';
 
 // 常用 Emoji 表情精选列表
 const COMMON_EMOJIS = [
@@ -321,7 +322,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             >
               {peer.avatarUrl ? (
                 <img
-                  src={peer.avatarUrl}
+                  src={resolveAvatarUrl(peer.avatarUrl)}
                   alt={peer.name}
                   className="w-full h-full object-cover"
                 />

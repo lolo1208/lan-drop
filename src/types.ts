@@ -110,7 +110,7 @@ export interface LocalDeviceConfig {
   downloadDir: string; // 下载目录
   heartbeatInterval: number; // 心跳广播间隔 (秒)
   updateUrl?: string; // 系统更新地址（局域网 url，启动时检查，存在新版本时自动更新）
-  autoStart?: boolean; // 开机启动（开关，默认开启）
+  autoStart?: boolean; // 开机启动（开关，默认关闭）
 }
 
 export interface RustCodeSnippet {

@@ -7,6 +7,7 @@ import { ChatMessage, FileAttachmentMeta, PeerDevice } from '../types';
 import { ipc, isTauri } from './ipc';
 import { storageService } from './storage';
 import { calculateBlobMd5 } from '../utils/md5';
+import { toCompactAvatarIdentifier } from '../utils/avatars';
 
 // 辅助：在 Tauri 环境下将硬盘保存路径转换为可信安全资源协议 URL (asset://)
 export async function convertToLocalUrl(filePath?: string): Promise<string> {
@@ -49,7 +50,7 @@ class ConversationManager {
       peerIp: targetPeer.ip,
       senderId: local.id,
       senderName: local.name,
-      senderAvatarUrl: local.avatarUrl,
+      senderAvatarUrl: toCompactAvatarIdentifier(local.avatarUrl),
       senderIp: local.ip,
       senderPort: local.port || 57088,
       content: text,
@@ -164,7 +165,7 @@ class ConversationManager {
       peerIp: targetPeer.ip,
       senderId: local.id,
       senderName: local.name,
-      senderAvatarUrl: local.avatarUrl,
+      senderAvatarUrl: toCompactAvatarIdentifier(local.avatarUrl),
       senderIp: local.ip,
       senderPort: local.port || 57088,
       content: file.name,
@@ -228,7 +229,7 @@ class ConversationManager {
       peerIp: senderIp,
       senderId: local.id,
       senderName: local.name,
-      senderAvatarUrl: local.avatarUrl,
+      senderAvatarUrl: toCompactAvatarIdentifier(local.avatarUrl),
       senderIp: local.ip,
       senderPort: local.port || 57088,
       content,
@@ -350,7 +351,7 @@ class ConversationManager {
       peerIp: senderIp,
       senderId: local.id,
       senderName: local.name,
-      senderAvatarUrl: local.avatarUrl,
+      senderAvatarUrl: toCompactAvatarIdentifier(local.avatarUrl),
       senderIp: local.ip,
       senderPort: local.port || 57088,
       content: resumeContent,

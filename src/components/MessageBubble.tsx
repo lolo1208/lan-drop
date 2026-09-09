@@ -253,12 +253,12 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   return (
     <div
       id={`msg-${message.id}`}
-      className={`flex flex-col mb-4 transition-all duration-300 ${
+      className={`flex flex-col mb-4 transition-all duration-500 rounded-2xl ${
         isMe ? 'items-end' : 'items-start'
       } ${
         isHighlighted
-          ? 'p-2 rounded-2xl bg-[#094771]/35 ring-2 ring-[#0078d4] shadow-lg shadow-[#0078d4]/15'
-          : ''
+          ? 'p-2 bg-[#094771]/35 ring-2 ring-[#0078d4] shadow-lg shadow-[#0078d4]/20'
+          : 'p-0 ring-0 bg-transparent shadow-none'
       }`}
     >
       {/* 消息时间与发送人 */}

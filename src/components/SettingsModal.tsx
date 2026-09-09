@@ -33,7 +33,13 @@ import {
   X,
 } from 'lucide-react';
 import { LocalDeviceConfig } from '../types';
-import { PRESET_AVATARS, processAvatarImageFile } from '../utils/avatars';
+import {
+  PRESET_AVATARS,
+  processAvatarImageFile,
+  resolveAvatarUrl,
+  toCompactAvatarIdentifier,
+  getRandomAvatarId,
+} from '../utils/avatars';
 import { getDefaultDocumentsPath, getDefaultMachineName } from '../services/storage';
 import { ipc } from '../services/ipc';
 
@@ -68,18 +74,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const realDir =
       !rawDir ||
       rawDir === '~/Downloads/FlashDrop' ||
-      rawDir.includes('[用户文档]') ||
-      rawDir.endsWith('LAN Drop')
+      rawDir.includes('[用户文档]')
         ? defaultRealPath
         : rawDir;
 
     return {
       ...config,
-      avatarUrl: config.avatarUrl || PRESET_AVATARS[0].url,
+      avatarUrl: config.avatarUrl ? toCompactAvatarIdentifier(config.avatarUrl) : getRandomAvatarId(),
       name: config.name || getDefaultMachineName(),
       downloadDir: realDir,
       updateUrl: config.updateUrl || '',
-      autoStart: config.autoStart !== undefined ? config.autoStart : true,
+      autoStart: config.autoStart !== undefined ? config.autoStart : false,
       port: config.port || 57088,
     };
   });
@@ -99,18 +104,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       const realDir =
         !rawDir ||
         rawDir === '~/Downloads/FlashDrop' ||
-        rawDir.includes('[用户文档]') ||
-        rawDir.endsWith('LAN Drop')
+        rawDir.includes('[用户文档]')
           ? (sysInfo?.document_dir || defaultRealPath)
           : rawDir;
 
       setFormData({
         ...config,
-        avatarUrl: config.avatarUrl || PRESET_AVATARS[0].url,
+        avatarUrl: config.avatarUrl ? toCompactAvatarIdentifier(config.avatarUrl) : getRandomAvatarId(),
         name: config.name || sysInfo?.hostname || getDefaultMachineName(),
         downloadDir: realDir,
         updateUrl: config.updateUrl || '',
-        autoStart: config.autoStart !== undefined ? config.autoStart : true,
+        autoStart: config.autoStart !== undefined ? config.autoStart : false,
         port: config.port || 57088,
       });
       setUpdateStatus(null);
@@ -146,7 +150,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       avatarUrl: PRESET_AVATARS[0].url,
       downloadDir: sysInfo?.document_dir || defaultRealPath,
       updateUrl: '',
-      autoStart: true,
+      autoStart: false,
       port: 57088,
     });
     setUpdateStatus(null);
@@ -236,11 +240,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  // 检查局域网更新源
+  // 检查局域网 Master 更新源
   const handleCheckUpdateNow = async () => {
-    if (!formData.updateUrl || !formData.updateUrl.trim()) {
-      setUpdateStatus('请先输入局域网更新地址');
-      setTimeout(() => setUpdateStatus(null), 3000);
+    const rawIp = formData.updateUrl?.trim() || '';
+    if (!rawIp) {
+      setUpdateStatus('请先输入局域网 Master 机器的 IP 地址');
+      setTimeout(() => setUpdateStatus(null), 3500);
       return;
     }
 
@@ -248,27 +253,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setUpdateStatus(null);
 
     try {
-      const url = formData.updateUrl.trim();
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000);
-
-      const resp = await fetch(url, {
-        method: 'GET',
-        signal: controller.signal,
-      }).catch(() => null);
-
-      clearTimeout(timeoutId);
-
-      if (resp && resp.ok) {
-        setUpdateStatus('已连接更新源，当前程序（v2.0.0）已是最新版本');
-      } else {
-        setUpdateStatus('已连接内网更新源，暂无新版本');
-      }
-    } catch (e) {
-      setUpdateStatus('已连接内网更新源，未发现更高版本程序');
+      const res = await ipc.checkForUpdates(rawIp);
+      setUpdateStatus(res.message || '检查完成');
+    } catch (e: any) {
+      setUpdateStatus(typeof e === 'string' ? e : '检查更新遇到异常，请重试');
     } finally {
       setCheckingUpdate(false);
-      setTimeout(() => setUpdateStatus(null), 5000);
+      setTimeout(() => setUpdateStatus(null), 6000);
     }
   };
 
@@ -346,7 +337,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   >
                     {formData.avatarUrl ? (
                       <img
-                        src={formData.avatarUrl}
+                        src={resolveAvatarUrl(formData.avatarUrl)}
                         alt="用户头像"
                         className="w-full h-full object-cover"
                       />
@@ -365,12 +356,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div className="flex-1 min-w-0">
                     <div className="grid grid-cols-6 gap-2 items-center">
                       {PRESET_AVATARS.map((avatar) => {
-                        const isSelected = formData.avatarUrl === avatar.url;
+                        const isSelected = toCompactAvatarIdentifier(formData.avatarUrl) === avatar.id;
                         return (
                           <button
                             key={avatar.id}
                             type="button"
-                            onClick={() => setFormData({ ...formData, avatarUrl: avatar.url })}
+                            onClick={() => setFormData({ ...formData, avatarUrl: avatar.id })}
                             className={`w-9 h-9 rounded-xl overflow-hidden border-2 transition-all p-0.5 flex items-center justify-center bg-[#1e1e1e] cursor-pointer ${
                               isSelected
                                 ? 'border-[#0078d4] ring-2 ring-[#0078d4]/40 scale-105 opacity-100'
@@ -575,13 +566,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               </div>
 
-              {/* 3. 系统更新地址 */}
+              {/* 3. 局域网更新源 (Master IP) */}
               <div className="bg-[#252526]/60 border border-[#333333] rounded-xl p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
                     <Globe className="w-4 h-4 text-[#38bdf8]" />
                     <label className="font-semibold text-[#e0e0e0] text-sm">
-                      系统更新地址
+                      局域网更新源 (Master IP)
                     </label>
                   </div>
 
@@ -592,20 +583,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="text-[11px] text-[#38bdf8] hover:text-[#7dd3fc] font-medium flex items-center gap-1 transition-colors disabled:opacity-50 cursor-pointer"
                   >
                     <RefreshCw className={`w-3 h-3 ${checkingUpdate ? 'animate-spin' : ''}`} />
-                    <span>检查更新</span>
+                    <span>{checkingUpdate ? '正在检查...' : '检查更新'}</span>
                   </button>
                 </div>
 
                 <input
-                  type="url"
+                  type="text"
                   value={formData.updateUrl || ''}
                   onChange={(e) => setFormData({ ...formData, updateUrl: e.target.value })}
-                  placeholder="例如: http://192.168.1.100:8080/lan-drop/version.json"
+                  placeholder="例如: 192.168.1.100"
                   className="w-full px-3.5 py-2 bg-[#1e1e1e] border border-[#3c3c3c] focus:border-[#0078d4] rounded-xl text-[#cccccc] font-mono focus:outline-none transition-colors text-xs"
                 />
 
                 <p className="text-[11px] text-[#858585] mt-1.5 leading-relaxed">
-                  设置局域网更新源，启动时自动检测新版本并更新
+                  输入内网任意一台 Master 机器的 IP 地址。当该机器在其“[用户文档]/LAN Drop/Update”目录下放置了 version.cfg 与安装文件时，本机将在启动及每 30 分钟自动检查并静默升级。
                 </p>
 
                 {updateStatus && (
@@ -621,8 +612,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="flex items-center gap-2">
                   <Power className="w-4 h-4 text-[#38bdf8]" />
                   <span className="font-semibold text-[#e0e0e0] text-sm">开机启动</span>
-                  <span className="text-[10px] px-1.5 py-0.2 bg-[#0078d4]/20 text-[#38bdf8] rounded-md font-medium">
-                    推荐开启
+                  <span className="text-[10px] px-1.5 py-0.2 bg-[#2a2d2e] text-[#858585] rounded-md font-medium">
+                    默认关闭
                   </span>
                 </div>
 

@@ -4,7 +4,7 @@
  */
 
 import { ChatMessage, LocalDeviceConfig, TransferTask } from '../types';
-import { PRESET_AVATARS } from '../utils/avatars';
+import { getRandomAvatarId, toCompactAvatarIdentifier, resolveAvatarUrl } from '../utils/avatars';
 import { isTauri } from '../utils/tauri';
 
 export function getDefaultMachineName(): string {
@@ -339,7 +339,7 @@ class LocalStorageService {
     }
   }
 
-  // --- 设备设置持久化 (SQLite .db 为第一真值来源) ---
+  // --- 设备设置持久化 (Tauri 环境严格仅使用 SQLite data.db，Web 演示环境使用内存/IndexedDB) ---
   private cachedSettings: LocalDeviceConfig | null = null;
 
   async loadSettingsFromDb(): Promise<LocalDeviceConfig> {
@@ -352,10 +352,9 @@ class LocalStorageService {
             cachedRealDocDir = dbSettings.downloadDir;
           }
 
-          // 如果 SQLite .db 中没有存储自定义头像（例如 .db 文件被用户手动删除并重建），必须重置为预设头像，不能使用 localStorage 中的旧头像
           const avatarUrl = dbSettings.avatarUrl && dbSettings.avatarUrl.trim() !== ''
-            ? dbSettings.avatarUrl
-            : PRESET_AVATARS[0].url;
+            ? toCompactAvatarIdentifier(dbSettings.avatarUrl)
+            : getRandomAvatarId();
 
           const formatted: LocalDeviceConfig = {
             id: dbSettings.id,
@@ -365,7 +364,7 @@ class LocalStorageService {
             ip: dbSettings.ip || '',
             port: dbSettings.port || 57088,
             downloadDir: dbSettings.downloadDir || getDefaultDocumentsPath(),
-            autoStart: dbSettings.autoStart !== undefined ? dbSettings.autoStart : true,
+            autoStart: dbSettings.autoStart !== undefined ? dbSettings.autoStart : false,
             updateUrl: dbSettings.updateUrl || '',
             multicastGroup: '239.255.42.99:7432',
             autoAccept: false,
@@ -373,12 +372,16 @@ class LocalStorageService {
           };
           this.cachedSettings = formatted;
           if (typeof localStorage !== 'undefined') {
-            localStorage.setItem('flashdrop_settings', JSON.stringify(formatted));
+            try {
+              localStorage.setItem('flashdrop_settings', JSON.stringify(formatted));
+            } catch {
+              // ignore
+            }
           }
           return formatted;
         }
       } catch (e) {
-        console.warn('从 SQLite 读取设置失败，使用本地兜底:', e);
+        console.warn('从 SQLite 读取设置失败，使用初始默认设置:', e);
       }
     }
 
@@ -393,98 +396,107 @@ class LocalStorageService {
     const defaultName = getDefaultMachineName();
     const defaultPath = getDefaultDocumentsPath();
 
-    if (typeof localStorage === 'undefined') {
-      const init: LocalDeviceConfig = {
-        id: 'node-' + Math.random().toString(36).substring(2, 10),
-        name: defaultName,
-        ip: '',
-        port: 57088,
-        os: 'windows',
-        avatarUrl: PRESET_AVATARS[0].url,
-        downloadDir: defaultPath,
-        autoStart: true,
-        updateUrl: '',
-        multicastGroup: '239.255.42.99:7432',
-        autoAccept: false,
-        heartbeatInterval: 10,
-      };
-      this.cachedSettings = init;
-      return init;
-    }
-
-    const saved = localStorage.getItem('flashdrop_settings');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (
-          !parsed.downloadDir ||
-          parsed.downloadDir === '~/Downloads/FlashDrop' ||
-          parsed.downloadDir.includes('[用户文档]') ||
-          parsed.downloadDir.includes('\\Users\\User\\') ||
-          parsed.downloadDir.includes('/Users/User/') ||
-          parsed.downloadDir.endsWith('LAN Drop')
-        ) {
-          parsed.downloadDir = defaultPath;
-        }
-        if (!parsed.port || parsed.port === 7890) {
-          parsed.port = 57088;
-        }
-        if (parsed.ip === '192.168.1.100') {
-          parsed.ip = '';
-        }
-        const full: LocalDeviceConfig = {
-          multicastGroup: '239.255.42.99:7432',
-          autoAccept: false,
-          heartbeatInterval: 10,
-          ...parsed,
-        };
-        this.cachedSettings = full;
-        return full;
-      } catch (e) {
-        console.error('Failed to parse settings:', e);
-      }
-    }
-
-    const initial: LocalDeviceConfig = {
+    const randomAvatar = getRandomAvatarId();
+    const defaultInit: LocalDeviceConfig = {
       id: 'node-' + Math.random().toString(36).substring(2, 10),
       name: defaultName,
       ip: '',
       port: 57088,
       os: 'windows',
-      avatarUrl: PRESET_AVATARS[0].url,
+      avatarUrl: randomAvatar,
       downloadDir: defaultPath,
-      autoStart: true,
+      autoStart: false,
       updateUrl: '',
       multicastGroup: '239.255.42.99:7432',
       autoAccept: false,
       heartbeatInterval: 10,
     };
-    this.cachedSettings = initial;
-    this.saveSettings(initial);
-    return initial;
+
+    // 优先尝试从 localStorage 读取历史设置（作为快速同步与 Web 环境降级）
+    if (typeof localStorage !== 'undefined') {
+      const saved = localStorage.getItem('flashdrop_settings');
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          if (
+            !parsed.downloadDir ||
+            parsed.downloadDir === '~/Downloads/FlashDrop' ||
+            parsed.downloadDir.includes('[用户文档]') ||
+            parsed.downloadDir.includes('\\Users\\User\\') ||
+            parsed.downloadDir.includes('/Users/User/')
+          ) {
+            parsed.downloadDir = defaultPath;
+          }
+          if (!parsed.port || parsed.port < 1024 || parsed.port > 65535) {
+            parsed.port = 57088;
+          }
+          if (parsed.ip === '192.168.1.100') {
+            parsed.ip = '';
+          }
+          const full: LocalDeviceConfig = {
+            id: parsed.id || defaultInit.id,
+            name: parsed.name || defaultName,
+            avatarUrl: parsed.avatarUrl ? toCompactAvatarIdentifier(parsed.avatarUrl) : randomAvatar,
+            os: parsed.os || 'windows',
+            ip: parsed.ip || '',
+            port: parsed.port || 57088,
+            downloadDir: parsed.downloadDir || defaultPath,
+            autoStart: parsed.autoStart !== undefined ? parsed.autoStart : false,
+            updateUrl: parsed.updateUrl || '',
+            multicastGroup: '239.255.42.99:7432',
+            autoAccept: false,
+            heartbeatInterval: 10,
+          };
+          this.cachedSettings = full;
+          return full;
+        } catch (e) {
+          console.error('Failed to parse settings in web mode:', e);
+        }
+      }
+    }
+
+    this.cachedSettings = defaultInit;
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem('flashdrop_settings', JSON.stringify(defaultInit));
+      } catch {
+        // ignore
+      }
+    }
+    return defaultInit;
   }
 
   saveSettings(config: LocalDeviceConfig): void {
-    this.cachedSettings = { ...config };
+    const compactAvatar = toCompactAvatarIdentifier(config.avatarUrl);
+    const updatedConfig = { ...config, avatarUrl: compactAvatar };
+    this.cachedSettings = updatedConfig;
+
+    // 同步保存至 localStorage
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('flashdrop_settings', JSON.stringify(config));
+      try {
+        localStorage.setItem('flashdrop_settings', JSON.stringify(updatedConfig));
+      } catch {
+        // ignore
+      }
     }
+
+    // Tauri 运行时：持久化保存到 SQLite data.db
     if (isTauri()) {
       import('@tauri-apps/api/core').then(({ invoke }) => {
         invoke('db_save_all_settings', {
           settings: {
-            id: config.id,
-            name: config.name,
-            avatarUrl: config.avatarUrl || '',
-            os: config.os,
-            ip: config.ip,
-            port: config.port || 57088,
-            multicastGroup: config.multicastGroup || '239.255.42.99:7432',
-            autoAccept: !!config.autoAccept,
-            downloadDir: config.downloadDir,
-            heartbeatInterval: config.heartbeatInterval || 10,
-            updateUrl: config.updateUrl || '',
-            autoStart: config.autoStart !== undefined ? config.autoStart : true,
+            id: updatedConfig.id,
+            name: updatedConfig.name,
+            avatarUrl: updatedConfig.avatarUrl || '',
+            os: updatedConfig.os,
+            ip: updatedConfig.ip,
+            port: updatedConfig.port || 57088,
+            multicastGroup: updatedConfig.multicastGroup || '239.255.42.99:7432',
+            autoAccept: !!updatedConfig.autoAccept,
+            downloadDir: updatedConfig.downloadDir,
+            heartbeatInterval: updatedConfig.heartbeatInterval || 10,
+            updateUrl: updatedConfig.updateUrl || '',
+            autoStart: updatedConfig.autoStart !== undefined ? updatedConfig.autoStart : false,
           },
         }).catch((err) => {
           console.warn('保存设置到 SQLite .db 失败:', err);

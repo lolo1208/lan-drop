@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
 import { ChatPanel } from './components/ChatPanel';
 import { MediaLightbox } from './components/MediaLightbox';
@@ -76,8 +76,27 @@ export function App() {
     filePath: undefined,
   });
 
+  // 最新未读后台消息引用（用于从系统托盘唤醒时快速定位至该消息及联系人）
+  const latestBackgroundMsgRef = useRef<ChatMessage | null>(null);
+  const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const notifiedMsgIdsRef = useRef<Set<string>>(new Set());
+
+  // 辅助函数：触发消息临时高亮框并在2.5秒后自动淡出消失
+  const triggerMessageHighlight = (msgId: string) => {
+    if (highlightTimeoutRef.current) {
+      clearTimeout(highlightTimeoutRef.current);
+    }
+    setHighlightMessageId(msgId);
+    highlightTimeoutRef.current = setTimeout(() => {
+      setHighlightMessageId((curr) => (curr === msgId ? null : curr));
+    }, 2500);
+  };
+
   // 1. 初始化 IPC 监听与配置读取
   useEffect(() => {
+    // 请求系统通知权限
+    ipc.requestNotificationPermission().catch(() => {});
+
     // 立即初始化底层的 Tauri IPC 原生事件监听（聊天消息、文件传输进度、设备发现等）
     ipc.init().catch((err) => {
       console.warn('初始化 IPC 事件监听失败:', err);
@@ -86,28 +105,31 @@ export function App() {
     // 首次进入时，优先从 SQLite .db 加载配置（若 .db 被重置/删除则恢复干净默认状态）
     storageService.loadSettingsFromDb().then((loadedConfig) => {
       setConfig(loadedConfig);
+      if (loadedConfig.updateUrl && loadedConfig.updateUrl.trim()) {
+        // 启动时若配置了 Master IP，静默检查内网更新
+        ipc.checkForUpdates(loadedConfig.updateUrl).catch(() => {});
+      }
     });
 
-    // 在 Tauri 环境下读取真实的系统文档路径与主机名与 IP
+    // 在 Tauri 环境下读取真实的系统文档路径与 IP，补充必要缺省字段
     ipc.getSysInfo().then((sysInfo) => {
       if (sysInfo) {
         const current = ipc.getLocalConfig();
         const newConfig = { ...current };
         let changed = false;
-        if (!newConfig.name || newConfig.name.includes('(dev-')) {
+        if (!newConfig.name) {
           newConfig.name = sysInfo.hostname;
           changed = true;
         }
         if (
           !newConfig.downloadDir ||
           newConfig.downloadDir.includes('[用户文档]') ||
-          newConfig.downloadDir === '~/Downloads/FlashDrop' ||
-          newConfig.downloadDir.endsWith('LAN Drop')
+          newConfig.downloadDir === '~/Downloads/FlashDrop'
         ) {
           newConfig.downloadDir = sysInfo.document_dir;
           changed = true;
         }
-        if (sysInfo.local_ip && sysInfo.local_ip !== '127.0.0.1' && sysInfo.local_ip !== '0.0.0.0') {
+        if (sysInfo.local_ip && sysInfo.local_ip !== '127.0.0.1' && sysInfo.local_ip !== '0.0.0.0' && !newConfig.ip) {
           newConfig.ip = sysInfo.local_ip;
           changed = true;
         }
@@ -166,14 +188,20 @@ export function App() {
       });
     });
 
-    // 监听聊天消息更新与接收
-    const unsubChat = ipc.on<ChatMessage>('chat://updated', (msg) => {
-      setAllChats((prev) => upsertMessage(prev, msg));
-
-      // 若当前未选中任何联系人，且收到来自对端的消息，自动聚焦至该联系人
-      setSelectedPeer((curr) => {
-        if (!curr && msg.senderId !== config.id) {
-          return {
+    // 辅助函数：定位到特定联系人并高亮消息
+    const focusPeerAndMessage = (msg: ChatMessage) => {
+      if (!msg || msg.senderId === config.id) return;
+      setPeers((currPeers) => {
+        const found = currPeers.find(
+          (p) =>
+            p.id === msg.senderId ||
+            (msg.fileAttachment?.senderIp && p.ip === msg.fileAttachment.senderIp) ||
+            ((msg as any).senderIp && p.ip === (msg as any).senderIp)
+        );
+        if (found) {
+          setSelectedPeer(found);
+        } else {
+          const newPeer: PeerDevice = {
             id: msg.senderId,
             name: msg.senderName || '局域网设备',
             ip: (msg as any).senderIp || msg.fileAttachment?.senderIp || '',
@@ -185,14 +213,82 @@ export function App() {
             pingMs: 1.0,
             version: '2.0.0',
           };
+          setSelectedPeer(newPeer);
         }
-        return curr;
+        return currPeers;
       });
-    });
+      triggerMessageHighlight(msg.id);
+    };
 
-    const unsubChatRecv = ipc.on<ChatMessage>('chat://received', (msg) => {
+    // 辅助函数：当程序在托盘或后台运行时收到新消息，处理未读定位与网页端通知（严格去重）
+    const notifyIncomingMessage = async (msg: ChatMessage) => {
+      if (!msg || msg.senderId === config.id || !isDisplayableMessage(msg)) return;
+
+      const now = Date.now();
+      const isFresh = !msg.timestamp || Math.abs(now - msg.timestamp) < 45000;
+      if (!isFresh) return;
+
+      if (notifiedMsgIdsRef.current.has(msg.id)) return;
+      notifiedMsgIdsRef.current.add(msg.id);
+      if (notifiedMsgIdsRef.current.size > 500) {
+        notifiedMsgIdsRef.current.clear();
+      }
+
+      const isActive = await ipc.isWindowActive();
+      // 当程序在任务栏托盘中（窗口隐藏/最小化/未激活）时记录最新消息
+      if (!isActive) {
+        latestBackgroundMsgRef.current = msg;
+
+        // 在非 Tauri（纯浏览器演示）环境下，触发标准 Web Notification 弹窗
+        if (!isTauri() && typeof window !== 'undefined' && 'Notification' in window) {
+          const senderName = msg.senderName || '局域网设备';
+          let bodyText = '';
+          if (msg.fileAttachment) {
+            if (msg.fileAttachment.isMedia || msg.msgType === 'image') {
+              bodyText = `[图片] ${msg.fileAttachment.name}`;
+            } else if (msg.msgType === 'video') {
+              bodyText = `[视频] ${msg.fileAttachment.name}`;
+            } else if (msg.msgType === 'audio') {
+              bodyText = `[语音/音频] ${msg.fileAttachment.name}`;
+            } else {
+              bodyText = `[文件] ${msg.fileAttachment.name}`;
+            }
+          } else {
+            bodyText = msg.content || '发来一条新消息';
+          }
+
+          const handleNotificationClick = async () => {
+            await ipc.showFromTray();
+            focusPeerAndMessage(msg);
+            latestBackgroundMsgRef.current = null;
+            try {
+              window.focus();
+            } catch {
+              // ignore
+            }
+          };
+
+          if (Notification.permission === 'granted') {
+            const notif = new Notification(senderName, {
+              body: bodyText,
+              icon: msg.senderAvatarUrl || '/icon.png',
+              tag: `msg-${msg.senderId}`,
+            });
+            notif.onclick = () => {
+              handleNotificationClick();
+              notif.close();
+            };
+          }
+        }
+      }
+    };
+
+    // 监听聊天消息更新与接收
+    const unsubChat = ipc.on<ChatMessage>('chat://updated', (msg) => {
       setAllChats((prev) => upsertMessage(prev, msg));
+      notifyIncomingMessage(msg);
 
+      // 若当前未选中任何联系人，且收到来自对端的消息，自动聚焦至该联系人
       setSelectedPeer((curr) => {
         if (!curr && msg.senderId !== config.id) {
           return {
@@ -306,11 +402,31 @@ export function App() {
       }
     });
 
+    // 监听窗口从托盘唤醒恢复事件，自动定位至最新发信联系人与消息
+    const unsubRestore = ipc.on('app://restored_from_tray', () => {
+      if (latestBackgroundMsgRef.current) {
+        focusPeerAndMessage(latestBackgroundMsgRef.current);
+        latestBackgroundMsgRef.current = null;
+      }
+    });
+
+    const handleWindowFocus = () => {
+      if (latestBackgroundMsgRef.current) {
+        focusPeerAndMessage(latestBackgroundMsgRef.current);
+        latestBackgroundMsgRef.current = null;
+      }
+    };
+    window.addEventListener('focus', handleWindowFocus);
+
     return () => {
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current);
+      }
+      window.removeEventListener('focus', handleWindowFocus);
+      unsubRestore();
       unsubConfig();
       unsubPeers();
       unsubChat();
-      unsubChatRecv();
       unsubIncomingProgress();
       unsubProgress();
       unsubError();

@@ -5,7 +5,7 @@
 
 import { ChatMessage, LocalDeviceConfig, PeerDevice, TransferTask } from '../types';
 import { detectLocalIPv4, storageService } from './storage';
-import { PRESET_AVATARS } from '../utils/avatars';
+import { PRESET_AVATARS, toCompactAvatarIdentifier, resolveAvatarUrl } from '../utils/avatars';
 import { isTauri } from '../utils/tauri';
 
 export { isTauri };
@@ -58,6 +58,7 @@ class IPCService {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('set_download_dir', { dir: this.localConfig.downloadDir });
+        await invoke('set_auto_start', { enabled: !!this.localConfig.autoStart });
         const synced = await invoke<any>('sync_local_device', {
           device: {
             id: this.localConfig.id,
@@ -80,6 +81,21 @@ class IPCService {
       }
     }
     this.broadcastLocalHeartbeat();
+  }
+
+  async setAutoStart(enabled: boolean): Promise<void> {
+    this.localConfig.autoStart = enabled;
+    storageService.saveSettings(this.localConfig);
+    this.emit('config://updated', this.localConfig);
+
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('set_auto_start', { enabled });
+      } catch (e) {
+        console.warn('调用 set_auto_start 失败:', e);
+      }
+    }
   }
 
   async triggerDiscoveryScan() {
@@ -106,7 +122,7 @@ class IPCService {
   registerDiscoveredPeer(rawPeer: Partial<PeerDevice> & { id: string; name: string; ip?: string; port?: number }): PeerDevice {
     const peerIp = rawPeer.ip || '';
     
-    // 生成确定的头像（优先使用对方广播的真实头像）
+    // 生成确定的头像（优先使用对方广播的真实头像；如果是系统头像，仅传递 ID '0'~'10'）
     let avatarUrl = rawPeer.avatarUrl;
     if (!avatarUrl || avatarUrl.trim() === '') {
       let hash = 0;
@@ -114,8 +130,10 @@ class IPCService {
         hash = (hash << 5) - hash + (rawPeer.id || rawPeer.name).charCodeAt(i);
         hash |= 0;
       }
-      const avatarIndex = Math.abs(hash) % PRESET_AVATARS.length;
-      avatarUrl = PRESET_AVATARS[avatarIndex].url;
+      const avatarIndex = Math.abs(hash) % 11;
+      avatarUrl = String(avatarIndex);
+    } else {
+      avatarUrl = toCompactAvatarIdentifier(avatarUrl);
     }
 
     const finalPeer: PeerDevice = {
@@ -397,7 +415,7 @@ class IPCService {
         }
       }, 5000);
 
-      // 3. 从 SQLite .db 加载全部持久化配置（若 .db 被删除则恢复干净默认状态）
+      // 3. 从 SQLite .db / localStorage 加载全部持久化配置
       const dbConfig = await storageService.loadSettingsFromDb();
       this.localConfig = { ...dbConfig };
 
@@ -410,12 +428,9 @@ class IPCService {
       const localDevice = await invoke<any>('get_local_device');
       if (localDevice && localDevice.ip && localDevice.ip !== '127.0.0.1' && localDevice.ip !== '0.0.0.0') {
         this.localConfig.ip = localDevice.ip;
-        if (!this.localConfig.name || this.localConfig.name.includes('(dev-')) {
-          this.localConfig.name = localDevice.name || this.localConfig.name;
-        }
       }
 
-      // 将最新设备配置同步至 Rust 核心与 SQLite
+      // 将持久化好的设备配置同步至 Rust 核心
       const syncedDevice = await invoke<any>('sync_local_device', {
         device: {
           id: this.localConfig.id,
@@ -423,12 +438,17 @@ class IPCService {
           ip: this.localConfig.ip,
           port: this.localConfig.port || 57088,
           os: this.localConfig.os,
-          avatarUrl: this.localConfig.avatarUrl || '',
+          avatarUrl: toCompactAvatarIdentifier(this.localConfig.avatarUrl),
         },
       });
 
       if (syncedDevice && syncedDevice.ip && syncedDevice.ip !== '127.0.0.1' && syncedDevice.ip !== '0.0.0.0') {
         this.localConfig.ip = syncedDevice.ip;
+      }
+
+      // 同步设定的下载路径至 Rust 核心
+      if (this.localConfig.downloadDir) {
+        await invoke('set_download_dir', { dir: this.localConfig.downloadDir }).catch(() => {});
       }
 
       storageService.saveSettings(this.localConfig);
@@ -627,7 +647,7 @@ class IPCService {
         peerId,
         senderId: this.localConfig.id,
         senderName: this.localConfig.name,
-        senderAvatarUrl: this.localConfig.avatarUrl,
+        senderAvatarUrl: toCompactAvatarIdentifier(this.localConfig.avatarUrl),
         content: String(payload),
         msgType: 'text',
         timestamp: Date.now(),
@@ -636,9 +656,7 @@ class IPCService {
     }
 
     // 确保携带自身头像与 IP/Port，供对端自动发现和回信
-    if (!msg.senderAvatarUrl) {
-      msg.senderAvatarUrl = this.localConfig.avatarUrl;
-    }
+    msg.senderAvatarUrl = toCompactAvatarIdentifier(msg.senderAvatarUrl || this.localConfig.avatarUrl);
     if (!msg.senderIp) {
       msg.senderIp = this.localConfig.ip;
     }
@@ -854,6 +872,177 @@ class IPCService {
     }
     const fileName = cleanExt ? `${md5}.${cleanExt}` : md5;
     return `[用户文档]/LAN Drop/Media/${fileName}`;
+  }
+  // 判断窗口当前是否处于激活/前台可见状态（如果被关闭隐藏至托盘或最小化则返回 false）
+  async isWindowActive(): Promise<boolean> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const active = await invoke<boolean>('is_window_visible');
+        return !!active;
+      } catch {
+        return !document.hidden;
+      }
+    }
+    return !document.hidden && document.hasFocus();
+  }
+
+  // 请求系统通知权限
+  async requestNotificationPermission(): Promise<boolean> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('request_notification_permission');
+        return true;
+      } catch (err) {
+        console.warn('Tauri 请求系统通知权限异常:', err);
+        return true;
+      }
+    }
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      if (Notification.permission === 'default') {
+        const res = await Notification.requestPermission();
+        return res === 'granted';
+      }
+      return Notification.permission === 'granted';
+    }
+    return false;
+  }
+
+  // 发送系统原生通知
+  async showNotification(title: string, body: string): Promise<void> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('show_system_notification', { title, body });
+        return;
+      } catch (err) {
+        console.warn('Tauri 发送系统通知失败:', err);
+      }
+    }
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, { body });
+    }
+  }
+
+  // 退出整个应用程序（彻底完全退出）
+  async exitApp(): Promise<void> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('exit_app');
+      } catch (err) {
+        console.error('退出应用失败:', err);
+      }
+    }
+  }
+
+  // 隐藏窗口到任务栏系统托盘（在任务栏程序条中不再显示）
+  async hideToTray(): Promise<void> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('hide_to_tray');
+      } catch (err) {
+        console.warn('隐藏至托盘失败:', err);
+      }
+    }
+  }
+
+  // 从托盘唤醒并恢复窗口显示
+  async showFromTray(): Promise<void> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('show_from_tray');
+      } catch (err) {
+        console.warn('从托盘恢复窗口失败:', err);
+      }
+    }
+  }
+
+  // 检查局域网 Master 机器的新版本更新 (并执行自动下载与替换重启)
+  async checkForUpdates(masterIp: string): Promise<{
+    status: 'latest' | 'updating' | 'no_master' | 'error' | 'no_config';
+    current_version: string;
+    remote_version?: string;
+    message: string;
+  }> {
+    const cleanIp = masterIp ? masterIp.trim() : '';
+    if (!cleanIp) {
+      return {
+        status: 'no_config',
+        current_version: '2.0.0',
+        message: '请先输入局域网 Master 机器的 IP 地址',
+      };
+    }
+
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const res = await invoke<any>('check_for_updates', { masterIp: cleanIp });
+        return res;
+      } catch (err: any) {
+        console.warn('Tauri 检查更新失败:', err);
+        return {
+          status: 'error',
+          current_version: '2.0.0',
+          message: typeof err === 'string' ? err : err?.message || '检查更新失败，请确认 Master 机器在线',
+        };
+      }
+    } else {
+      // 浏览器 Web 演示环境：尝试 fetch 目标 IP 的 /api/update/version
+      try {
+        let targetHost = cleanIp;
+        if (targetHost.startsWith('http://')) targetHost = targetHost.slice(7);
+        if (targetHost.startsWith('https://')) targetHost = targetHost.slice(8);
+        if (targetHost.includes('/')) targetHost = targetHost.split('/')[0];
+        if (!targetHost.includes(':')) targetHost = `${targetHost}:57088`;
+
+        const controller = new AbortController();
+        const tid = setTimeout(() => controller.abort(), 3500);
+        const resp = await fetch(`http://${targetHost}/api/update/version`, {
+          signal: controller.signal,
+        }).catch(() => null);
+        clearTimeout(tid);
+
+        if (resp && resp.ok) {
+          const data = await resp.json();
+          if (data.available && data.version) {
+            if (data.version !== '2.0.0') {
+              return {
+                status: 'updating',
+                current_version: '2.0.0',
+                remote_version: data.version,
+                message: `检测到 Master 新版本 (v${data.version})，已触发自动更新流程`,
+              };
+            }
+            return {
+              status: 'latest',
+              current_version: '2.0.0',
+              remote_version: data.version,
+              message: `当前程序已是最新版本 (v2.0.0)`,
+            };
+          }
+          return {
+            status: 'no_master',
+            current_version: '2.0.0',
+            message: `Master 机器 (${cleanIp}) 尚未发布更新（[文档]/LAN Drop/Update 目录下未放置 version.cfg）`,
+          };
+        }
+        return {
+          status: 'error',
+          current_version: '2.0.0',
+          message: `无法连接到 Master 机器 (${cleanIp})，请确认网络连接与机器是否在线`,
+        };
+      } catch {
+        return {
+          status: 'error',
+          current_version: '2.0.0',
+          message: `连接 Master 机器 (${cleanIp}) 超时，请检查 IP 与防火墙`,
+        };
+      }
+    }
   }
 }
 

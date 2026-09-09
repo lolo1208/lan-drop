@@ -1,8 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "LAN Drop",
-  "version": "2.0.0",
-  "identifier": "com.landrop.transfer",
+  "identifier": "com.firegames.landrop",
   "build": {
     "beforeDevCommand": "pnpm run dev",
     "devUrl": "http://localhost:3000",
@@ -12,7 +11,8 @@
   "app": {
     "windows": [
       {
-        "title": "内网投送 - LAN Drop",
+        "label": "main",
+        "title": "内网投送 (LAN Drop)",
         "width": 1200,
         "height": 800,
         "minWidth": 980,
@@ -34,7 +34,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "publisher": "LAN Drop OpenSource",
+    "publisher": "Fire Games",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -9,9 +9,14 @@ mod db;
 mod discovery;
 mod server;
 mod transfer;
+mod updater;
 
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State,
+};
 use tokio::sync::RwLock;
 
 // 共享应用状态
@@ -542,6 +547,144 @@ fn open_in_folder(path: String) -> Result<(), String> {
     res.map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// 跨平台开机自启动配置管理 (支持 Windows 注册表、macOS LaunchAgent plist 及 Linux autostart .desktop)
+#[cfg(target_os = "windows")]
+fn configure_autostart(enabled: bool) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let app_path = std::env::current_exe().map_err(|e| format!("获取程序路径失败: {}", e))?;
+    let app_path_str = app_path.to_string_lossy().to_string();
+    let value_data = format!("\"{}\"", app_path_str.replace('/', "\\"));
+
+    if enabled {
+        let status = Command::new("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "LAN Drop",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &value_data,
+                "/f",
+            ])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .status()
+            .map_err(|e| format!("执行 reg add 失败: {}", e))?;
+
+        if status.success() {
+            log::info!("已成功添加 Windows 开机启动项");
+            Ok(())
+        } else {
+            Err("添加 Windows 开机启动项失败".into())
+        }
+    } else {
+        let status = Command::new("reg")
+            .args([
+                "delete",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "LAN Drop",
+                "/f",
+            ])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .status();
+
+        match status {
+            Ok(s) => {
+                if s.success() {
+                    log::info!("已成功清理 Windows 开机启动项");
+                }
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("清理 Windows 开机启动项警告: {}", e);
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn configure_autostart(enabled: bool) -> Result<(), String> {
+    let home_dir = dirs::home_dir().ok_or_else(|| "无法获取用户主目录".to_string())?;
+    let launch_agents_dir = home_dir.join("Library").join("LaunchAgents");
+    let plist_path = launch_agents_dir.join("com.firegames.landrop.plist");
+
+    if enabled {
+        let app_path = std::env::current_exe().map_err(|e| format!("获取程序路径失败: {}", e))?;
+        let _ = std::fs::create_dir_all(&launch_agents_dir);
+        let plist_content = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.firegames.landrop</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"#,
+            app_path.to_string_lossy()
+        );
+        std::fs::write(&plist_path, plist_content).map_err(|e| format!("写入 plist 失败: {}", e))?;
+        log::info!("已成功添加 macOS 开机启动 LaunchAgent: {:?}", plist_path);
+    } else {
+        if plist_path.exists() {
+            let _ = std::fs::remove_file(&plist_path);
+            log::info!("已成功清理 macOS 开机启动 LaunchAgent");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn configure_autostart(enabled: bool) -> Result<(), String> {
+    let home_dir = dirs::home_dir().ok_or_else(|| "无法获取用户主目录".to_string())?;
+    let autostart_dir = home_dir.join(".config").join("autostart");
+    let desktop_path = autostart_dir.join("com.firegames.landrop.desktop");
+
+    if enabled {
+        let app_path = std::env::current_exe().map_err(|e| format!("获取程序路径失败: {}", e))?;
+        let _ = std::fs::create_dir_all(&autostart_dir);
+        let desktop_content = format!(
+            r#"[Desktop Entry]
+Type=Application
+Name=LAN Drop
+Exec={}
+Terminal=false
+X-GNOME-Autostart-enabled=true
+"#,
+            app_path.to_string_lossy()
+        );
+        std::fs::write(&desktop_path, desktop_content).map_err(|e| format!("写入 autostart .desktop 失败: {}", e))?;
+        log::info!("已成功添加 Linux 开机启动 desktop 项: {:?}", desktop_path);
+    } else {
+        if desktop_path.exists() {
+            let _ = std::fs::remove_file(&desktop_path);
+            log::info!("已成功清理 Linux 开机启动 desktop 项");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn configure_autostart(_enabled: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[tauri::command]
+fn set_auto_start(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let _ = state.db.set_kv("auto_start", &enabled.to_string());
+    configure_autostart(enabled)
+}
+
 // SQLite 数据库持久化 IPC 指令
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct AppSettingsPayload {
@@ -562,7 +705,7 @@ pub struct AppSettingsPayload {
     pub heartbeat_interval: u32,
     #[serde(rename = "updateUrl", default)]
     pub update_url: String,
-    #[serde(rename = "autoStart", default = "default_true")]
+    #[serde(rename = "autoStart", default)]
     pub auto_start: bool,
 }
 
@@ -572,9 +715,6 @@ fn default_multicast_group() -> String {
 fn default_heartbeat_interval() -> u32 {
     10
 }
-fn default_true() -> bool {
-    true
-}
 
 #[tauri::command]
 async fn db_get_all_settings(state: State<'_, AppState>) -> Result<AppSettingsPayload, String> {
@@ -583,16 +723,17 @@ async fn db_get_all_settings(state: State<'_, AppState>) -> Result<AppSettingsPa
     let kv_map = state.db.get_all_kv().unwrap_or_default();
 
     let id = kv_map.get("node_id").cloned().unwrap_or_else(|| dev.id.clone());
-    let name = kv_map.get("user_name").cloned().unwrap_or_else(|| dev.name.clone());
-    let avatar_url = kv_map.get("avatar_url").cloned().unwrap_or_default();
+    let name = kv_map.get("user_name").cloned().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| dev.name.clone());
+    let avatar_url = kv_map.get("avatar_url").cloned().unwrap_or_else(|| dev.avatar_url.clone());
     let port = kv_map
         .get("port")
         .and_then(|p| p.parse::<u16>().ok())
+        .filter(|&p| p >= 1024)
         .unwrap_or(dev.port);
     let auto_start = kv_map
         .get("auto_start")
-        .map(|s| s != "false")
-        .unwrap_or(true);
+        .map(|s| s == "true")
+        .unwrap_or(false);
     let update_url = kv_map.get("update_url").cloned().unwrap_or_default();
     let real_doc_files_dir = dirs::document_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -601,9 +742,13 @@ async fn db_get_all_settings(state: State<'_, AppState>) -> Result<AppSettingsPa
         .to_string_lossy()
         .to_string();
 
-    let mut saved_dir = kv_map.get("download_dir").cloned().unwrap_or_else(|| download_dir.clone());
-    if saved_dir.trim().is_empty() 
-        || saved_dir.contains("\\Users\\User\\") 
+    let mut saved_dir = kv_map
+        .get("download_dir")
+        .cloned()
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(|| download_dir.clone());
+
+    if saved_dir.contains("\\Users\\User\\") 
         || saved_dir.contains("/Users/User/") 
         || saved_dir.contains("/home/user/") 
     {
@@ -624,8 +769,8 @@ async fn db_get_all_settings(state: State<'_, AppState>) -> Result<AppSettingsPa
         auto_accept: false,
         download_dir: saved_dir,
         heartbeat_interval: 10,
-        update_url: update_url,
-        auto_start: auto_start,
+        update_url,
+        auto_start,
     })
 }
 
@@ -681,6 +826,8 @@ async fn db_save_all_settings(settings: AppSettingsPayload, state: State<'_, App
     let _ = state.db.set_kv("download_dir", &settings.download_dir);
     let _ = state.db.set_kv("auto_start", &settings.auto_start.to_string());
     let _ = state.db.set_kv("update_url", &settings.update_url);
+
+    let _ = configure_autostart(settings.auto_start);
 
     // 同步更新内存状态
     {
@@ -814,8 +961,154 @@ pub fn detect_best_local_ip() -> std::net::IpAddr {
     local_ip_address::local_ip().unwrap_or_else(|_| std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)))
 }
 
+pub fn send_desktop_notification(app: &AppHandle, title: &str, body: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        use std::os::windows::process::CommandExt;
+
+        // 对 XML 实体字符进行转义
+        let title_clean = title
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;");
+        let body_clean = body
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;");
+
+        let ps_cmd = format!(
+            r#"$ErrorActionPreference = 'SilentlyContinue';
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null;
+$xml = @"
+<toast activationType="protocol" launch="http://127.0.0.1:57088/api/wake_from_tray">
+    <visual>
+        <binding template="ToastGeneric">
+            <text>{}</text>
+            <text>{}</text>
+        </binding>
+    </visual>
+    <actions>
+        <action content="打开应用" arguments="http://127.0.0.1:57088/api/wake_from_tray" activationType="protocol"/>
+    </actions>
+</toast>
+"@;
+$doc = [Windows.Data.Xml.Dom.XmlDocument]::new();
+$doc.LoadXml($xml);
+$toast = [Windows.UI.Notifications.ToastNotification]::new($doc);
+$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\WindowsPowerShell\v1.0\powershell.exe');
+$notifier.Show($toast);
+"#,
+            title_clean, body_clean
+        );
+
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW 隐藏控制台
+            .spawn();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app.notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show();
+    }
+}
+
+#[tauri::command]
+async fn request_notification_permission(_app: AppHandle) -> Result<bool, String> {
+    Ok(true)
+}
+
+#[tauri::command]
+async fn show_system_notification(
+    app: AppHandle,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    send_desktop_notification(&app, &title, &body);
+    Ok(())
+}
+
+#[tauri::command]
+async fn is_window_visible(app: AppHandle) -> Result<bool, String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let is_vis = window.is_visible().unwrap_or(false);
+        let is_min = window.is_minimized().unwrap_or(false);
+        let is_foc = window.is_focused().unwrap_or(false);
+        return Ok(is_vis && !is_min && is_foc);
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+async fn exit_app(app: AppHandle) -> Result<(), String> {
+    log::info!("正在安全退出应用...");
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+async fn hide_to_tray(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+        let _ = window.set_skip_taskbar(true);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn show_from_tray(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_skip_taskbar(false);
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_focus();
+        let _ = window.set_always_on_top(false);
+        let _ = window.emit("app://restored_from_tray", ());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_for_updates(
+    app: AppHandle,
+    master_ip: String,
+) -> Result<updater::UpdateCheckResult, String> {
+    updater::check_and_perform_update(&app, &master_ip, true).await
+}
+
+const SINGLE_INSTANCE_PORT: u16 = 57087;
+
+fn ensure_single_instance() -> Option<std::net::TcpListener> {
+    match std::net::TcpListener::bind(("127.0.0.1", SINGLE_INSTANCE_PORT)) {
+        Ok(listener) => Some(listener),
+        Err(_) => {
+            println!("LAN Drop 程序已经在运行中，正在唤醒已存在的实例...");
+            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", SINGLE_INSTANCE_PORT)) {
+                use std::io::Write;
+                let _ = stream.write_all(b"WAKEUP\n");
+            }
+            std::process::exit(0);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    // 0. 单实例运行控制：保证程序同时只可以运行一个，重复双击启动时自动唤醒后台已有窗口并直接退出
+    let single_instance_listener = ensure_single_instance();
+
     tracing_subscriber::fmt::init();
 
     // 1. 初始化 SQLite 数据库与获取持久化设备唯一标识
@@ -848,16 +1141,40 @@ async fn main() {
         }
     };
 
+    // 从 SQLite 持久化恢复用户自定义的偏好设置
+    let saved_name = database.get_kv("user_name").ok().flatten();
+    let saved_avatar = match database.get_kv("avatar_url") {
+        Ok(Some(avatar)) if !avatar.trim().is_empty() => avatar,
+        _ => {
+            // 用户首次上线或初次启动应用时，自动随机抽取 0~10 中的任意一个 (11个预设头像) 作为默认头像并持久化
+            let rand_num = (uuid::Uuid::new_v4().as_u128() % 11) as u8;
+            let random_avatar = rand_num.to_string();
+            let _ = database.set_kv("avatar_url", &random_avatar);
+            log::info!("首次启动应用，已为用户随机抽取并保存默认头像 ID: {}", random_avatar);
+            random_avatar
+        }
+    };
+    let saved_port = database.get_kv("port").ok().flatten().and_then(|p| p.parse::<u16>().ok()).unwrap_or(discovery::DEFAULT_PORT);
+    let saved_download_dir = database.get_kv("download_dir").ok().flatten();
+    let saved_auto_start = database.get_kv("auto_start").ok().flatten().map(|s| s == "true").unwrap_or(false);
+
+    if let Err(e) = configure_autostart(saved_auto_start) {
+        log::warn!("初始化系统开机自启动状态失败: {}", e);
+    }
+
     // 2. 获取本地最优网络信息与设备标识
     let local_ip = detect_best_local_ip();
     let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "Desktop".into());
+    let final_name = saved_name.filter(|s| !s.trim().is_empty()).unwrap_or(hostname);
+    let final_port = if saved_port >= 1024 { saved_port } else { discovery::DEFAULT_PORT };
+
     let local_info = discovery::DeviceInfo {
         id: node_id,
-        name: hostname,
+        name: final_name,
         ip: local_ip.to_string(),
-        port: discovery::DEFAULT_PORT,
+        port: final_port,
         os: std::env::consts::OS.to_string(),
-        avatar_url: String::new(),
+        avatar_url: saved_avatar,
     };
 
     let local_state = Arc::new(RwLock::new(local_info.clone()));
@@ -873,9 +1190,15 @@ async fn main() {
         .join("Media");
     let _ = std::fs::create_dir_all(&default_media_dir_path);
     let default_doc_dir = default_doc_dir_path.to_string_lossy().to_string();
-    let download_dir = Arc::new(RwLock::new(default_doc_dir));
+
+    let final_download_dir = saved_download_dir
+        .filter(|d| !d.trim().is_empty() && !d.contains("\\Users\\User\\") && !d.contains("/Users/User/"))
+        .unwrap_or(default_doc_dir);
+
+    let download_dir = Arc::new(RwLock::new(final_download_dir));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             db: database.clone(),
             local_device: local_state.clone(),
@@ -883,6 +1206,86 @@ async fn main() {
         })
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // 0. 启动单实例通信监听：收到后续二次启动进程发来的唤醒指令时，自动恢复并置顶现有主窗口
+            if let Some(listener) = single_instance_listener {
+                let single_handle = app.handle().clone();
+                let _ = listener.set_nonblocking(true);
+                tokio::spawn(async move {
+                    if let Ok(tokio_listener) = tokio::net::TcpListener::from_std(listener) {
+                        while let Ok((mut socket, _)) = tokio_listener.accept().await {
+                            let mut buf = [0u8; 32];
+                            use tokio::io::AsyncReadExt;
+                            if let Ok(n) = socket.read(&mut buf).await {
+                                if n > 0 {
+                                    log::info!("收到单实例唤醒消息，自动恢复置顶主窗口");
+                                    if let Some(window) = single_handle.get_webview_window("main") {
+                                        let _ = window.show();
+                                        let _ = window.unminimize();
+                                        let _ = window.set_focus();
+                                        let _ = window.set_skip_taskbar(false);
+                                        let _ = window.emit("app://restored_from_tray", ());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // 1. 创建系统托盘图标（Tray Icon）与右键菜单（打开、退出）
+            let open_item = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+
+            let mut tray_builder = TrayIconBuilder::new()
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .tooltip("内网投送 (LAN Drop)")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                            let _ = window.set_skip_taskbar(false);
+                            let _ = window.emit("app://restored_from_tray", ());
+                        }
+                    }
+                    "quit" => {
+                        log::info!("从系统托盘右键菜单退出应用");
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    match event {
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            ..
+                        }
+                        | TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        } => {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                                let _ = window.set_skip_taskbar(false);
+                                let _ = window.emit("app://restored_from_tray", ());
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+
+            let _tray = tray_builder.build(app)?;
 
             // 2. 启动纯 HTTP 网段设备并发探测守护线程 (⚠️ 禁止添加 UDP 组播/广播逻辑)
             let disc_handle = handle.clone();
@@ -901,7 +1304,34 @@ async fn main() {
                 server::start_axum_server(server_handle, server_db, server_port, server_download_dir, server_local_state).await;
             });
 
+            // 4. 启动局域网 Master 静默自动更新守护协程（启动 5 秒后首次检查，随后每 30 分钟静默检测一次）
+            let update_handle = handle.clone();
+            let update_db = database.clone();
+            let update_local_state = local_state.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                loop {
+                    if let Ok(Some(master_ip)) = update_db.get_kv("update_url") {
+                        let clean_ip = master_ip.trim();
+                        let my_ip = update_local_state.read().await.ip.clone();
+                        if !clean_ip.is_empty() && clean_ip != my_ip && clean_ip != "127.0.0.1" && clean_ip != "localhost" {
+                            log::info!("正在静默检查 Master 局域网更新源: {}", clean_ip);
+                            let _ = updater::check_and_perform_update(&update_handle, clean_ip, false).await;
+                        }
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1800)).await;
+                }
+            });
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 点击应用窗口的关闭按钮时，不要退出程序，而是在程序栏不再显示，只显示任务栏托盘图标
+                api.prevent_close();
+                let _ = window.hide();
+                let _ = window.set_skip_taskbar(true);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_local_device,
@@ -911,6 +1341,7 @@ async fn main() {
             probe_peer_ip,
             get_sys_info,
             set_download_dir,
+            set_auto_start,
             send_chat_message,
             start_file_transfer,
             transfer_file_data,
@@ -922,6 +1353,13 @@ async fn main() {
             get_media_dir,
             save_media_file_to_disk,
             save_media_from_path,
+            exit_app,
+            check_for_updates,
+            request_notification_permission,
+            show_system_notification,
+            is_window_visible,
+            hide_to_tray,
+            show_from_tray,
             db_get_all_settings,
             db_save_all_settings,
             db_get_kv,
