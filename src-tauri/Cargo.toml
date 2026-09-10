@@ -1,12 +1,12 @@
 [package]
 name = "lan-drop"
-version = "1.0.3"
+version = "1.0.4"
 description = "内网投送 (LAN Drop) - 基于 Tauri v2 + Rust + React 的轻量级 P2P 局域网极速文件传输与即时投送工具"
 edition = "2021"
 
 [dependencies]
 # Tauri v2 核心框架
-tauri = { version = "2.0.0", features = ["protocol-asset", "tray-icon"] }
+tauri = { version = "2.0.0", features = ["protocol-asset", "tray-icon", "devtools"] }
 tauri-plugin-shell = "2.0.0"
 tauri-plugin-dialog = "2.0.0"
 tauri-plugin-fs = "2.0.0"

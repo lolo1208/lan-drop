@@ -1,92 +1,20 @@
-// LAN Drop (内网投送) - Axum 异步 HTTP 接收服务端与流式投送接收
+// Axum 异步 HTTP 请求处理与流式分块文件接收
 use axum::{
     body::Body,
-    extract::{ConnectInfo, DefaultBodyLimit, Query, State},
+    extract::{ConnectInfo, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
-    Json, Router,
+    Json,
 };
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{Emitter, Manager};
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
+use crate::server::{ServerContext, StreamTransferParams};
 
-#[derive(Clone)]
-struct ServerContext {
-    app: AppHandle,
-    db: Arc<crate::db::Database>,
-    download_dir: Arc<tokio::sync::RwLock<String>>,
-    local_device: Arc<tokio::sync::RwLock<crate::discovery::DeviceInfo>>,
-    notified_msg_ids: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
-}
-
-#[derive(Deserialize)]
-struct StreamTransferParams {
-    #[serde(default)]
-    task_id: String,
-    #[serde(default)]
-    file_name: String,
-    #[serde(default)]
-    file_size: u64,
-    #[serde(default)]
-    sender_id: String,
-    #[serde(default)]
-    offset: u64,
-    #[serde(default)]
-    folder: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ChatMessagePayload {
-    pub id: String,
-    pub sender_id: String,
-    pub sender_name: String,
-    pub text: String,
-    pub timestamp: i64,
-}
-
-/// 启动 Axum 轻量级异步服务
-pub async fn start_axum_server(
-    app: AppHandle,
-    db: Arc<crate::db::Database>,
-    port: u16,
-    download_dir: Arc<tokio::sync::RwLock<String>>,
-    local_device: Arc<tokio::sync::RwLock<crate::discovery::DeviceInfo>>,
-) {
-    let ctx = ServerContext {
-        app,
-        db,
-        download_dir,
-        local_device,
-        notified_msg_ids: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
-    };
-
-    let router = Router::new()
-        .route("/api/ping", get(|| async { "pong" }))
-        .route("/api/info", get(handle_get_info))
-        .route("/api/message", post(handle_incoming_message))
-        .route("/api/transfer/stream", post(handle_stream_transfer))
-        .route("/api/wake_from_tray", post(handle_wake_from_tray).get(handle_wake_from_tray))
-        .route("/api/update/version", get(handle_get_update_version))
-        .route("/api/update/download", get(handle_download_update))
-        .layer(DefaultBodyLimit::disable())
-        .layer(tower_http::cors::CorsLayer::permissive())
-        .with_state(Arc::new(ctx));
-
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    log::info!("Axum 接收服务端已在 {} 启动", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("绑定 Axum 端口失败");
-    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.expect("Axum 服务运行异常");
-}
-
-/// 响应通知点击或外部唤醒：将应用从托盘还原并唤醒至前台
-async fn handle_wake_from_tray(State(ctx): State<Arc<ServerContext>>) -> impl IntoResponse {
+pub async fn handle_wake_from_tray(State(ctx): State<Arc<ServerContext>>) -> impl IntoResponse {
     if let Some(window) = ctx.app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -103,13 +31,13 @@ async fn handle_wake_from_tray(State(ctx): State<Arc<ServerContext>>) -> impl In
 }
 
 /// 响应对端探测请求：返回自身设备信息 (包含 id, name, ip, port, os, avatarUrl)
-async fn handle_get_info(State(ctx): State<Arc<ServerContext>>) -> impl IntoResponse {
+pub async fn handle_get_info(State(ctx): State<Arc<ServerContext>>) -> impl IntoResponse {
     let dev = ctx.local_device.read().await.clone();
     Json(dev)
 }
 
 /// 响应内网 Master 更新检查请求：读取 "[用户文档]/LAN Drop/Update/version.cfg" 版本号
-async fn handle_get_update_version() -> impl IntoResponse {
+pub async fn handle_get_update_version() -> impl IntoResponse {
     let update_dir = dirs::document_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("LAN Drop")
@@ -135,7 +63,7 @@ async fn handle_get_update_version() -> impl IntoResponse {
 }
 
 /// 响应内网 Master 更新下载请求：流式提供 "[用户文档]/LAN Drop/Update/lan-drop.exe" (或 lan-drop) 文件
-async fn handle_download_update() -> Result<impl IntoResponse, (axum::http::StatusCode, &'static str)> {
+pub async fn handle_download_update() -> Result<impl IntoResponse, (axum::http::StatusCode, &'static str)> {
     let update_dir = dirs::document_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("LAN Drop")
@@ -203,7 +131,7 @@ async fn handle_download_update() -> Result<impl IntoResponse, (axum::http::Stat
 }
 
 /// 接收局域网即时聊天消息与信令
-async fn handle_incoming_message(
+pub async fn handle_incoming_message(
     State(ctx): State<Arc<ServerContext>>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
     Json(mut payload): Json<serde_json::Value>,
@@ -355,7 +283,7 @@ async fn handle_incoming_message(
 
 /// 核心：通过 Tokio AsyncWrite 流式将 HTTP Body 直接落地磁盘
 /// 不在 RAM 中构建完整缓冲，极低内存占用，跑满局域网物理带宽
-async fn handle_stream_transfer(
+pub async fn handle_stream_transfer(
     State(ctx): State<Arc<ServerContext>>,
     Query(params): Query<StreamTransferParams>,
     body: Body,
@@ -539,86 +467,4 @@ async fn handle_stream_transfer(
     }));
 
     Ok(StatusCode::OK)
-}
-
-/// 检查目标文件在本地已落盘的大小（用于断点续传精准确定 offset）
-pub async fn query_partial_file_size(download_dir: &str, file_name: &str) -> u64 {
-    let file_name_only = std::path::Path::new(file_name)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| file_name.to_string());
-
-    let safe_name: String = file_name_only
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c,
-        })
-        .collect();
-
-    let mut candidate_dirs = Vec::new();
-    if !download_dir.trim().is_empty() {
-        candidate_dirs.push(std::path::PathBuf::from(download_dir));
-    }
-    if let Some(doc) = dirs::document_dir() {
-        candidate_dirs.push(doc.join("LAN Drop").join("Files"));
-    }
-    if let Some(dl) = dirs::download_dir() {
-        candidate_dirs.push(dl.join("LAN Drop").join("Files"));
-    }
-    if let Some(data) = dirs::data_local_dir() {
-        candidate_dirs.push(data.join("LAN Drop").join("Files"));
-    }
-    candidate_dirs.push(std::env::temp_dir().join("LAN Drop").join("Files"));
-    candidate_dirs.push(std::path::PathBuf::from(".").join("LAN Drop").join("Files"));
-
-    for dir in candidate_dirs {
-        let p = dir.join(&safe_name);
-        if let Ok(meta) = tokio::fs::metadata(&p).await {
-            if meta.is_file() {
-                return meta.len();
-            }
-        }
-    }
-    0
-}
-
-/// 发送 HTTP 消息给对端
-pub async fn send_http_message(
-    ip: &str,
-    port: u16,
-    payload: serde_json::Value,
-) -> Result<(), String> {
-    let clean_ip = ip.trim();
-    if clean_ip.is_empty() {
-        return Err("目标 IP 地址为空".into());
-    }
-
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(6))
-        .connect_timeout(Duration::from_secs(3))
-        .tcp_nodelay(true)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let url = format!("http://{}:{}/api/message", clean_ip, port);
-    log::info!("正在向对端发送 HTTP 消息: {}", url);
-    let resp = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("无法连接对端 ({}): {}", url, e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        log::error!("对端返回错误响应 {}: {}", status, body);
-        return Err(format!("对端响应状态码 {}: {}", status, body));
-    }
-
-    log::info!("对端 {} 响应 HTTP 状态码: {}", url, resp.status());
-    Ok(())
 }

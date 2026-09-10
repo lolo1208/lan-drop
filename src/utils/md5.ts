@@ -1,10 +1,8 @@
 /**
- * 标准 RFC 1321 MD5 消息摘要算法实现
- * 纯 TypeScript 零外部依赖，支持浏览器 Web 和 Node/Tauri 环境
- * 用于计算图片、音频、视频等多媒体文件的 MD5 唯一标识，杜绝重复保存
+ * 文件与二进制数据 MD5 校验哈希计算工具
+ * 提供高效的分块哈希算法，用于文件完整性校验及去重识别
  */
 
-// MD5 辅助操作
 function safeAdd(x: number, y: number): number {
   const lsw = (x & 0xffff) + (y & 0xffff);
   const msw = (x >> 16) + (y >> 16) + (lsw >> 16);
@@ -15,23 +13,62 @@ function bitRotateLeft(num: number, cnt: number): number {
   return (num << cnt) | (num >>> (32 - cnt));
 }
 
-function md5cmn(q: number, a: number, b: number, x: number, s: number, t: number): number {
+function md5cmn(
+  q: number,
+  a: number,
+  b: number,
+  x: number,
+  s: number,
+  t: number,
+): number {
   return safeAdd(bitRotateLeft(safeAdd(safeAdd(a, q), safeAdd(x, t)), s), b);
 }
 
-function md5ff(a: number, b: number, c: number, d: number, x: number, s: number, t: number): number {
+function md5ff(
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  x: number,
+  s: number,
+  t: number,
+): number {
   return md5cmn((b & c) | (~b & d), a, b, x, s, t);
 }
 
-function md5gg(a: number, b: number, c: number, d: number, x: number, s: number, t: number): number {
+function md5gg(
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  x: number,
+  s: number,
+  t: number,
+): number {
   return md5cmn((b & d) | (c & ~d), a, b, x, s, t);
 }
 
-function md5hh(a: number, b: number, c: number, d: number, x: number, s: number, t: number): number {
+function md5hh(
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  x: number,
+  s: number,
+  t: number,
+): number {
   return md5cmn(b ^ c ^ d, a, b, x, s, t);
 }
 
-function md5ii(a: number, b: number, c: number, d: number, x: number, s: number, t: number): number {
+function md5ii(
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  x: number,
+  s: number,
+  t: number,
+): number {
   return md5cmn(c ^ (b | ~d), a, b, x, s, t);
 }
 
@@ -128,9 +165,11 @@ function binlMD5(x: number[], len: number): number[] {
 }
 
 function rhex(num: number): string {
-  let str = '';
+  let str = "";
   for (let j = 0; j <= 3; j++) {
-    str += ((num >> (j * 8 + 4)) & 0x0f).toString(16) + ((num >> (j * 8)) & 0x0f).toString(16);
+    str +=
+      ((num >> (j * 8 + 4)) & 0x0f).toString(16) +
+      ((num >> (j * 8)) & 0x0f).toString(16);
   }
   return str;
 }
@@ -147,7 +186,7 @@ export function calculateMd5(bytes: Uint8Array): string {
   }
 
   const resultWords = binlMD5(words, bytes.length * 8);
-  return resultWords.map(rhex).join('');
+  return resultWords.map(rhex).join("");
 }
 
 /**

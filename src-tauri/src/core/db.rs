@@ -1,4 +1,4 @@
-// LAN Drop (内网投送) - SQLite 真实持久化模块
+// SQLite 真实持久化模块
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -223,6 +223,38 @@ impl Database {
             }
         }
         Ok(results)
+    }
+
+    pub fn delete_chat_message(&self, msg_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM chat_messages WHERE id = ?1", [msg_id])?;
+        Ok(())
+    }
+
+    pub fn delete_chat_messages_by_ids(&self, msg_ids: &[String]) -> Result<()> {
+        if msg_ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        for id in msg_ids {
+            let _ = conn.execute("DELETE FROM chat_messages WHERE id = ?1", [id]);
+        }
+        Ok(())
+    }
+
+    pub fn clear_chat_by_peer(&self, peer_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM chat_messages WHERE peer_id = ?1 OR sender_id = ?1",
+            [peer_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_transfer_by_id(&self, task_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM transfers WHERE id = ?1", [task_id])?;
+        Ok(())
     }
 
     pub fn clear_all_history(&self) -> Result<()> {

@@ -1,38 +1,42 @@
 /**
- * 本地持久化服务 (Tauri SQLite 原生持久化 + 浏览器 IndexedDB/LocalStorage 双模)
- * 优先使用 SQLite 本地数据库文件 (data.db，存储于 [用户文档]/LAN Drop/data.db) 存储历史文件传输记录、局域网聊天记录和设备偏好设置
+ * 本地持久化存储服务
+ * 封装 SQLite 数据库交互（消息记录、传输任务、配置项存储）并提供浏览器 localStorage 降级兼容
  */
 
-import { ChatMessage, LocalDeviceConfig, TransferTask } from '../types';
-import { getRandomAvatarId, toCompactAvatarIdentifier, resolveAvatarUrl } from '../utils/avatars';
-import { isTauri } from '../utils/tauri';
+import { ChatMessage, LocalDeviceConfig, TransferTask } from "../types";
+import {
+  getRandomAvatarId,
+  toCompactAvatarIdentifier,
+  resolveAvatarUrl,
+} from "../utils/avatars";
+import { isTauri } from "../utils/tauri";
 
 export function getDefaultMachineName(): string {
-  return 'LAN Drop Device';
+  return "LAN Drop Device";
 }
 
-let cachedRealDocDir: string = '';
+let cachedRealDocDir: string = "";
 
 export function setDefaultDocumentsCache(path: string) {
-  if (path && !path.includes('[用户文档]')) {
+  if (path && !path.includes("[用户文档]")) {
     cachedRealDocDir = path;
   }
 }
 
 export function getDefaultDocumentsPath(): string {
   if (cachedRealDocDir) return cachedRealDocDir;
-  return '[用户文档]/LAN Drop/Files';
+  return "[用户文档]/LAN Drop/Files";
 }
 
 /**
  * 浏览器端基于 WebRTC ICE Candidate 轻量嗅探真实局域网 IPv4
  */
 export async function detectLocalIPv4(): Promise<string | null> {
-  if (typeof window === 'undefined' || !window.RTCPeerConnection) return null;
+  if (typeof window === "undefined" || !window.RTCPeerConnection) return null;
   return new Promise((resolve) => {
     try {
       const pc = new RTCPeerConnection({ iceServers: [] });
-      pc.createDataChannel('detect-lan-ip');
+      pc.createDataChannel("detect-lan-ip");
       pc.createOffer()
         .then((offer) => pc.setLocalDescription(offer))
         .catch(() => resolve(null));
@@ -49,10 +53,16 @@ export async function detectLocalIPv4(): Promise<string | null> {
       pc.onicecandidate = (event) => {
         if (!event || !event.candidate || !event.candidate.candidate) return;
         const candidateStr = event.candidate.candidate;
-        const match = candidateStr.match(/([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/);
+        const match = candidateStr.match(
+          /([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/,
+        );
         if (match) {
           const ip = match[1];
-          if (!ip.startsWith('127.') && !ip.startsWith('0.') && !ip.startsWith('169.254.')) {
+          if (
+            !ip.startsWith("127.") &&
+            !ip.startsWith("0.") &&
+            !ip.startsWith("169.254.")
+          ) {
             clearTimeout(timer);
             try {
               pc.close();
@@ -69,11 +79,11 @@ export async function detectLocalIPv4(): Promise<string | null> {
   });
 }
 
-const DB_NAME = 'flashdrop_p2p_db';
+const DB_NAME = "flashdrop_p2p_db";
 const DB_VERSION = 1;
-const STORE_TRANSFERS = 'transfers';
-const STORE_CHATS = 'chats';
-const STORE_SETTINGS = 'settings';
+const STORE_TRANSFERS = "transfers";
+const STORE_CHATS = "chats";
+const STORE_SETTINGS = "settings";
 
 class LocalStorageService {
   private dbPromise: Promise<IDBDatabase> | null = null;
@@ -82,8 +92,8 @@ class LocalStorageService {
     if (this.dbPromise) return this.dbPromise;
 
     this.dbPromise = new Promise((resolve, reject) => {
-      if (typeof window === 'undefined' || !window.indexedDB) {
-        reject(new Error('IndexedDB not supported'));
+      if (typeof window === "undefined" || !window.indexedDB) {
+        reject(new Error("IndexedDB not supported"));
         return;
       }
 
@@ -93,20 +103,26 @@ class LocalStorageService {
         const db = (event.target as IDBOpenDBRequest).result;
 
         if (!db.objectStoreNames.contains(STORE_TRANSFERS)) {
-          const transferStore = db.createObjectStore(STORE_TRANSFERS, { keyPath: 'id' });
-          transferStore.createIndex('peerId', 'peerId', { unique: false });
-          transferStore.createIndex('status', 'status', { unique: false });
-          transferStore.createIndex('startTime', 'startTime', { unique: false });
+          const transferStore = db.createObjectStore(STORE_TRANSFERS, {
+            keyPath: "id",
+          });
+          transferStore.createIndex("peerId", "peerId", { unique: false });
+          transferStore.createIndex("status", "status", { unique: false });
+          transferStore.createIndex("startTime", "startTime", {
+            unique: false,
+          });
         }
 
         if (!db.objectStoreNames.contains(STORE_CHATS)) {
-          const chatStore = db.createObjectStore(STORE_CHATS, { keyPath: 'id' });
-          chatStore.createIndex('peerId', 'peerId', { unique: false });
-          chatStore.createIndex('timestamp', 'timestamp', { unique: false });
+          const chatStore = db.createObjectStore(STORE_CHATS, {
+            keyPath: "id",
+          });
+          chatStore.createIndex("peerId", "peerId", { unique: false });
+          chatStore.createIndex("timestamp", "timestamp", { unique: false });
         }
 
         if (!db.objectStoreNames.contains(STORE_SETTINGS)) {
-          db.createObjectStore(STORE_SETTINGS, { keyPath: 'key' });
+          db.createObjectStore(STORE_SETTINGS, { keyPath: "key" });
         }
       };
 
@@ -121,18 +137,20 @@ class LocalStorageService {
   async saveTransfer(task: TransferTask): Promise<void> {
     if (isTauri()) {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('db_save_transfer', { transferJson: JSON.stringify(task) });
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("db_save_transfer", {
+          transferJson: JSON.stringify(task),
+        });
         return;
       } catch (e) {
-        console.warn('Tauri SQLite 保存传输记录失败:', e);
+        console.warn("Tauri SQLite 保存传输记录失败:", e);
       }
     }
 
     try {
       const db = await this.getDb();
       return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_TRANSFERS, 'readwrite');
+        const tx = db.transaction(STORE_TRANSFERS, "readwrite");
         const store = tx.objectStore(STORE_TRANSFERS);
         const serialized = { ...task };
         store.put(serialized);
@@ -140,27 +158,27 @@ class LocalStorageService {
         tx.onerror = () => reject(tx.error);
       });
     } catch {
-      this.fallbackSave('transfers', task);
+      this.fallbackSave("transfers", task);
     }
   }
 
   async getAllTransfers(): Promise<TransferTask[]> {
     if (isTauri()) {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const list = await invoke<TransferTask[]>('db_get_all_transfers');
+        const { invoke } = await import("@tauri-apps/api/core");
+        const list = await invoke<TransferTask[]>("db_get_all_transfers");
         if (Array.isArray(list)) {
           return list;
         }
       } catch (e) {
-        console.warn('Tauri SQLite 读取传输记录失败:', e);
+        console.warn("Tauri SQLite 读取传输记录失败:", e);
       }
     }
 
     try {
       const db = await this.getDb();
       return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_TRANSFERS, 'readonly');
+        const tx = db.transaction(STORE_TRANSFERS, "readonly");
         const store = tx.objectStore(STORE_TRANSFERS);
         const request = store.getAll();
         request.onsuccess = () => {
@@ -171,58 +189,61 @@ class LocalStorageService {
         request.onerror = () => reject(request.error);
       });
     } catch {
-      return this.fallbackGetAll<TransferTask>('transfers');
+      return this.fallbackGetAll<TransferTask>("transfers");
     }
   }
 
   async clearTransfers(): Promise<void> {
     if (isTauri()) {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('db_clear_all_history');
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("db_clear_all_history");
         return;
       } catch (e) {
-        console.warn('Tauri SQLite 清空历史失败:', e);
+        console.warn("Tauri SQLite 清空历史失败:", e);
       }
     }
 
     try {
       const db = await this.getDb();
-      const tx = db.transaction(STORE_TRANSFERS, 'readwrite');
+      const tx = db.transaction(STORE_TRANSFERS, "readwrite");
       tx.objectStore(STORE_TRANSFERS).clear();
     } catch {
-      localStorage.removeItem('flashdrop_transfers');
+      localStorage.removeItem("flashdrop_transfers");
     }
   }
 
   // --- 聊天记录 ---
   async saveChatMessage(msg: ChatMessage): Promise<void> {
     // 忽略握手/文件同意等系统信令，不落库生成无气泡的空消息
-    if (msg.msgType === 'system' || (msg.content && msg.content.startsWith('file_accept:'))) {
+    if (
+      msg.msgType === "system" ||
+      (msg.content && msg.content.startsWith("file_accept:"))
+    ) {
       return;
     }
 
     if (isTauri()) {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('db_save_chat_message', { msgJson: JSON.stringify(msg) });
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("db_save_chat_message", { msgJson: JSON.stringify(msg) });
         return;
       } catch (e) {
-        console.warn('Tauri SQLite 保存聊天记录失败:', e);
+        console.warn("Tauri SQLite 保存聊天记录失败:", e);
       }
     }
 
     try {
       const db = await this.getDb();
       return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_CHATS, 'readwrite');
+        const tx = db.transaction(STORE_CHATS, "readwrite");
         const store = tx.objectStore(STORE_CHATS);
         store.put(msg);
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
       });
     } catch {
-      this.fallbackSave('chats', msg);
+      this.fallbackSave("chats", msg);
     }
   }
 
@@ -230,26 +251,29 @@ class LocalStorageService {
     let resultList: ChatMessage[] = [];
     if (isTauri()) {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const list = await invoke<ChatMessage[]>('db_get_chat_messages_by_peer', { peerId });
+        const { invoke } = await import("@tauri-apps/api/core");
+        const list = await invoke<ChatMessage[]>(
+          "db_get_chat_messages_by_peer",
+          { peerId },
+        );
         if (Array.isArray(list)) {
           return this.sanitizeLoadedChats(list);
         }
       } catch (e) {
-        console.warn('Tauri SQLite 按联系人读取聊天记录失败:', e);
+        console.warn("Tauri SQLite 按联系人读取聊天记录失败:", e);
       }
     }
 
     try {
       const db = await this.getDb();
       resultList = await new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_CHATS, 'readonly');
+        const tx = db.transaction(STORE_CHATS, "readonly");
         const store = tx.objectStore(STORE_CHATS);
-        const index = store.index('peerId');
+        const index = store.index("peerId");
         const request = index.getAll(peerId);
         request.onsuccess = () => {
           const list: ChatMessage[] = (request.result || []).filter(
-            (m) => m.peerId === peerId || m.senderId === peerId
+            (m) => m.peerId === peerId || m.senderId === peerId,
           );
           list.sort((a, b) => a.timestamp - b.timestamp);
           resolve(list);
@@ -257,7 +281,7 @@ class LocalStorageService {
         request.onerror = () => reject(request.error);
       });
     } catch {
-      const all = await this.fallbackGetAll<ChatMessage>('chats');
+      const all = await this.fallbackGetAll<ChatMessage>("chats");
       resultList = all
         .filter((m) => m.peerId === peerId || m.senderId === peerId)
         .sort((a, b) => a.timestamp - b.timestamp);
@@ -268,13 +292,13 @@ class LocalStorageService {
   async getAllChats(): Promise<ChatMessage[]> {
     if (isTauri()) {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const list = await invoke<ChatMessage[]>('db_get_all_chat_messages');
+        const { invoke } = await import("@tauri-apps/api/core");
+        const list = await invoke<ChatMessage[]>("db_get_all_chat_messages");
         if (Array.isArray(list)) {
           return this.sanitizeLoadedChats(list);
         }
       } catch (e) {
-        console.warn('Tauri SQLite 读取全部聊天记录失败:', e);
+        console.warn("Tauri SQLite 读取全部聊天记录失败:", e);
       }
     }
 
@@ -282,7 +306,7 @@ class LocalStorageService {
     try {
       const db = await this.getDb();
       resultList = await new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_CHATS, 'readonly');
+        const tx = db.transaction(STORE_CHATS, "readonly");
         const store = tx.objectStore(STORE_CHATS);
         const request = store.getAll();
         request.onsuccess = () => {
@@ -293,7 +317,7 @@ class LocalStorageService {
         request.onerror = () => reject(request.error);
       });
     } catch {
-      resultList = await this.fallbackGetAll<ChatMessage>('chats');
+      resultList = await this.fallbackGetAll<ChatMessage>("chats");
     }
     return this.sanitizeLoadedChats(resultList);
   }
@@ -301,8 +325,8 @@ class LocalStorageService {
   // 历史消息启动自愈修复：若因应用关闭、崩溃或进程重启导致遗留状态为 transferring 的传输任务，自动转为 failed（传输中断）以展示继续接收按钮
   private sanitizeLoadedChats(list: ChatMessage[]): ChatMessage[] {
     for (const msg of list) {
-      if (msg.fileAttachment && msg.fileAttachment.state === 'transferring') {
-        msg.fileAttachment.state = 'failed';
+      if (msg.fileAttachment && msg.fileAttachment.state === "transferring") {
+        msg.fileAttachment.state = "failed";
         msg.fileAttachment.speed = 0;
         this.saveChatMessage(msg).catch(() => {});
       }
@@ -310,11 +334,17 @@ class LocalStorageService {
     return list;
   }
 
-  async markPeerMessagesAsRead(peerId: string, currentUserId: string): Promise<number> {
+  async markPeerMessagesAsRead(
+    peerId: string,
+    currentUserId: string,
+  ): Promise<number> {
     try {
       const messages = await this.getChatMessages(peerId);
       const unreadMsgs = messages.filter(
-        (m) => (m.peerId === peerId || m.senderId === peerId) && m.senderId !== currentUserId && !m.isRead
+        (m) =>
+          (m.peerId === peerId || m.senderId === peerId) &&
+          m.senderId !== currentUserId &&
+          !m.isRead,
       );
       if (unreadMsgs.length === 0) return 0;
 
@@ -325,29 +355,120 @@ class LocalStorageService {
       }
       return unreadMsgs.length;
     } catch (e) {
-      console.warn('批量标记已读失败:', e);
+      console.warn("批量标记已读失败:", e);
       return 0;
     }
   }
 
-  async clearChat(peerId: string): Promise<void> {
+  async deleteChatMessage(msgId: string): Promise<void> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("db_delete_chat_message", { msgId });
+      } catch (e) {
+        console.warn("Tauri SQLite 删除单条聊天记录失败:", e);
+      }
+    }
+
     try {
       const db = await this.getDb();
-      const tx = db.transaction(STORE_CHATS, 'readwrite');
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_CHATS, "readwrite");
+        const store = tx.objectStore(STORE_CHATS);
+        store.delete(msgId);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch {
+      const all = await this.fallbackGetAll<ChatMessage>("chats");
+      const filtered = all.filter((m) => m.id !== msgId);
+      localStorage.setItem("flashdrop_chats", JSON.stringify(filtered));
+    }
+  }
+
+  async deleteChatMessages(msgIds: string[]): Promise<void> {
+    if (!msgIds || msgIds.length === 0) return;
+    const idSet = new Set(msgIds);
+
+    if (isTauri()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("db_delete_chat_messages", { msgIds });
+      } catch (e) {
+        console.warn("Tauri SQLite 批量删除聊天记录失败:", e);
+      }
+    }
+
+    try {
+      const db = await this.getDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_CHATS, "readwrite");
+        const store = tx.objectStore(STORE_CHATS);
+        for (const id of msgIds) {
+          store.delete(id);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch {
+      const all = await this.fallbackGetAll<ChatMessage>("chats");
+      const filtered = all.filter((m) => !idSet.has(m.id));
+      localStorage.setItem("flashdrop_chats", JSON.stringify(filtered));
+    }
+  }
+
+  async deleteTransfer(taskId: string): Promise<void> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("db_delete_transfer", { taskId });
+      } catch (e) {
+        console.warn("Tauri SQLite 删除传输记录失败:", e);
+      }
+    }
+
+    try {
+      const db = await this.getDb();
+      const tx = db.transaction(STORE_TRANSFERS, "readwrite");
+      tx.objectStore(STORE_TRANSFERS).delete(taskId);
+    } catch {
+      const all = await this.fallbackGetAll<TransferTask>("transfers");
+      const filtered = all.filter((t) => t.id !== taskId);
+      localStorage.setItem("flashdrop_transfers", JSON.stringify(filtered));
+    }
+  }
+
+  async clearChat(peerId: string): Promise<void> {
+    if (isTauri()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("db_clear_chat_by_peer", { peerId });
+      } catch (e) {
+        console.warn("Tauri SQLite 清空联系人聊天记录失败:", e);
+      }
+    }
+
+    try {
+      const db = await this.getDb();
+      const tx = db.transaction(STORE_CHATS, "readwrite");
       const store = tx.objectStore(STORE_CHATS);
-      const index = store.index('peerId');
-      const request = index.openCursor(peerId);
+      const request = store.openCursor();
       request.onsuccess = (event) => {
         const cursor = (event.target as IDBRequest).result;
         if (cursor) {
-          cursor.delete();
+          const m = cursor.value as ChatMessage;
+          if (m.peerId === peerId || m.senderId === peerId || (m as any).peerIp === peerId) {
+            cursor.delete();
+          }
           cursor.continue();
         }
       };
     } catch {
-      const all = await this.fallbackGetAll<ChatMessage>('chats');
-      const filtered = all.filter((m) => m.peerId !== peerId && m.senderId !== peerId);
-      localStorage.setItem('flashdrop_chats', JSON.stringify(filtered));
+      const all = await this.fallbackGetAll<ChatMessage>("chats");
+      const filtered = all.filter(
+        (m) => m.peerId !== peerId && m.senderId !== peerId,
+      );
+      localStorage.setItem("flashdrop_chats", JSON.stringify(filtered));
     }
   }
 
@@ -357,36 +478,57 @@ class LocalStorageService {
   async loadSettingsFromDb(): Promise<LocalDeviceConfig> {
     if (isTauri()) {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const dbSettings = await invoke<LocalDeviceConfig>('db_get_all_settings');
+        const { invoke } = await import("@tauri-apps/api/core");
+        const dbSettings = await invoke<LocalDeviceConfig>(
+          "db_get_all_settings",
+        );
         if (dbSettings && dbSettings.id) {
-          if (dbSettings.downloadDir && !dbSettings.downloadDir.includes('\\Users\\User\\') && !dbSettings.downloadDir.includes('/Users/User/')) {
+          if (
+            dbSettings.downloadDir &&
+            !dbSettings.downloadDir.includes("\\Users\\User\\") &&
+            !dbSettings.downloadDir.includes("/Users/User/")
+          ) {
             cachedRealDocDir = dbSettings.downloadDir;
           }
 
-          const avatarUrl = dbSettings.avatarUrl && dbSettings.avatarUrl.trim() !== ''
-            ? toCompactAvatarIdentifier(dbSettings.avatarUrl)
-            : getRandomAvatarId();
+          const avatarUrl =
+            dbSettings.avatarUrl && dbSettings.avatarUrl.trim() !== ""
+              ? toCompactAvatarIdentifier(dbSettings.avatarUrl)
+              : getRandomAvatarId();
 
           const formatted: LocalDeviceConfig = {
             id: dbSettings.id,
-            name: dbSettings.name && dbSettings.name !== 'Windows PC' && dbSettings.name !== 'My Computer' ? dbSettings.name : (dbSettings.name || getDefaultMachineName()),
+            name:
+              dbSettings.name &&
+              dbSettings.name !== "Windows PC" &&
+              dbSettings.name !== "My Computer"
+                ? dbSettings.name
+                : dbSettings.name || getDefaultMachineName(),
             avatarUrl,
-            os: dbSettings.os || 'windows',
-            ip: dbSettings.ip || '',
+            os: dbSettings.os || "windows",
+            ip: dbSettings.ip || "",
             port: dbSettings.port || 57088,
-            downloadDir: dbSettings.downloadDir && !dbSettings.downloadDir.includes('C:\\LAN Drop\\Files') ? dbSettings.downloadDir : getDefaultDocumentsPath(),
-            autoStart: dbSettings.autoStart !== undefined ? dbSettings.autoStart : false,
-            updateUrl: dbSettings.updateUrl || '',
-            globalHotkey: (dbSettings as any).globalHotkey || 'Ctrl+Alt+Shift+S',
-            multicastGroup: '239.255.42.99:7432',
+            downloadDir:
+              dbSettings.downloadDir &&
+              !dbSettings.downloadDir.includes("C:\\LAN Drop\\Files")
+                ? dbSettings.downloadDir
+                : getDefaultDocumentsPath(),
+            autoStart:
+              dbSettings.autoStart !== undefined ? dbSettings.autoStart : false,
+            updateUrl: dbSettings.updateUrl || "",
+            globalHotkey:
+              (dbSettings as any).globalHotkey || "Ctrl+Alt+Shift+S",
+            multicastGroup: "239.255.42.99:7432",
             autoAccept: false,
             heartbeatInterval: 10,
           };
           this.cachedSettings = formatted;
-          if (typeof localStorage !== 'undefined') {
+          if (typeof localStorage !== "undefined") {
             try {
-              localStorage.setItem('flashdrop_settings', JSON.stringify(formatted));
+              localStorage.setItem(
+                "flashdrop_settings",
+                JSON.stringify(formatted),
+              );
             } catch {
               // ignore
             }
@@ -394,7 +536,7 @@ class LocalStorageService {
           return formatted;
         }
       } catch (e) {
-        console.warn('从 SQLite 读取设置失败，使用初始默认设置:', e);
+        console.warn("从 SQLite 读取设置失败，使用初始默认设置:", e);
       }
     }
 
@@ -411,68 +553,71 @@ class LocalStorageService {
 
     const randomAvatar = getRandomAvatarId();
     const defaultInit: LocalDeviceConfig = {
-      id: 'node-' + Math.random().toString(36).substring(2, 10),
+      id: "node-" + Math.random().toString(36).substring(2, 10),
       name: defaultName,
-      ip: '',
+      ip: "",
       port: 57088,
-      os: 'windows',
+      os: "windows",
       avatarUrl: randomAvatar,
       downloadDir: defaultPath,
       autoStart: false,
-      globalHotkey: 'Ctrl+Alt+Shift+S',
-      updateUrl: '',
-      multicastGroup: '239.255.42.99:7432',
+      globalHotkey: "Ctrl+Alt+Shift+S",
+      updateUrl: "",
+      multicastGroup: "239.255.42.99:7432",
       autoAccept: false,
       heartbeatInterval: 10,
     };
 
     // 优先尝试从 localStorage 读取历史设置（作为快速同步与 Web 环境降级）
-    if (typeof localStorage !== 'undefined') {
-      const saved = localStorage.getItem('flashdrop_settings');
+    if (typeof localStorage !== "undefined") {
+      const saved = localStorage.getItem("flashdrop_settings");
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
           if (
             !parsed.downloadDir ||
-            parsed.downloadDir === '~/Downloads/FlashDrop' ||
-            parsed.downloadDir.includes('[用户文档]') ||
-            parsed.downloadDir.includes('\\Users\\User\\') ||
-            parsed.downloadDir.includes('/Users/User/')
+            parsed.downloadDir === "~/Downloads/FlashDrop" ||
+            parsed.downloadDir.includes("[用户文档]") ||
+            parsed.downloadDir.includes("\\Users\\User\\") ||
+            parsed.downloadDir.includes("/Users/User/")
           ) {
             parsed.downloadDir = defaultPath;
           }
           if (!parsed.port || parsed.port < 1024 || parsed.port > 65535) {
             parsed.port = 57088;
           }
-          if (parsed.ip === '192.168.1.100') {
-            parsed.ip = '';
+          if (parsed.ip === "192.168.1.100") {
+            parsed.ip = "";
           }
           const full: LocalDeviceConfig = {
             id: parsed.id || defaultInit.id,
             name: parsed.name || defaultName,
-            avatarUrl: parsed.avatarUrl ? toCompactAvatarIdentifier(parsed.avatarUrl) : randomAvatar,
-            os: parsed.os || 'windows',
-            ip: parsed.ip || '',
+            avatarUrl: parsed.avatarUrl
+              ? toCompactAvatarIdentifier(parsed.avatarUrl)
+              : randomAvatar,
+            os: parsed.os || "windows",
+            ip: parsed.ip || "",
             port: parsed.port || 57088,
             downloadDir: parsed.downloadDir || defaultPath,
-            autoStart: parsed.autoStart !== undefined ? parsed.autoStart : false,
-            updateUrl: parsed.updateUrl || '',
-            multicastGroup: '239.255.42.99:7432',
+            autoStart:
+              parsed.autoStart !== undefined ? parsed.autoStart : false,
+            updateUrl: parsed.updateUrl || "",
+            multicastGroup: "239.255.42.99:7432",
             autoAccept: false,
             heartbeatInterval: 10,
           };
           this.cachedSettings = full;
           return full;
         } catch (e) {
-          console.error('Failed to parse settings in web mode:', e);
+          console.error("Failed to parse settings in web mode:", e);
         }
       }
     }
 
     this.cachedSettings = defaultInit;
-    if (typeof localStorage !== 'undefined') {
+    if (typeof localStorage !== "undefined") {
       try {
-        localStorage.setItem('flashdrop_settings', JSON.stringify(defaultInit));
+        localStorage.setItem("flashdrop_settings", JSON.stringify(defaultInit));
       } catch {
         // ignore
       }
@@ -486,9 +631,12 @@ class LocalStorageService {
     this.cachedSettings = updatedConfig;
 
     // 同步保存至 localStorage
-    if (typeof localStorage !== 'undefined') {
+    if (typeof localStorage !== "undefined") {
       try {
-        localStorage.setItem('flashdrop_settings', JSON.stringify(updatedConfig));
+        localStorage.setItem(
+          "flashdrop_settings",
+          JSON.stringify(updatedConfig),
+        );
       } catch {
         // ignore
       }
@@ -496,25 +644,29 @@ class LocalStorageService {
 
     // Tauri 运行时：持久化保存到 SQLite data.db
     if (isTauri()) {
-      import('@tauri-apps/api/core').then(({ invoke }) => {
-        invoke('db_save_all_settings', {
+      import("@tauri-apps/api/core").then(({ invoke }) => {
+        invoke("db_save_all_settings", {
           settings: {
             id: updatedConfig.id,
             name: updatedConfig.name,
-            avatarUrl: updatedConfig.avatarUrl || '',
+            avatarUrl: updatedConfig.avatarUrl || "",
             os: updatedConfig.os,
             ip: updatedConfig.ip,
             port: updatedConfig.port || 57088,
-            multicastGroup: updatedConfig.multicastGroup || '239.255.42.99:7432',
+            multicastGroup:
+              updatedConfig.multicastGroup || "239.255.42.99:7432",
             autoAccept: !!updatedConfig.autoAccept,
             downloadDir: updatedConfig.downloadDir,
             heartbeatInterval: updatedConfig.heartbeatInterval || 10,
-            updateUrl: updatedConfig.updateUrl || '',
-            autoStart: updatedConfig.autoStart !== undefined ? updatedConfig.autoStart : false,
-            globalHotkey: updatedConfig.globalHotkey || 'Alt+Space',
+            updateUrl: updatedConfig.updateUrl || "",
+            autoStart:
+              updatedConfig.autoStart !== undefined
+                ? updatedConfig.autoStart
+                : false,
+            globalHotkey: updatedConfig.globalHotkey || "Alt+Space",
           },
         }).catch((err) => {
-          console.warn('保存设置到 SQLite .db 失败:', err);
+          console.warn("保存设置到 SQLite .db 失败:", err);
         });
       });
     }
@@ -522,7 +674,7 @@ class LocalStorageService {
 
   // --- LocalStorage Fallbacks ---
   private fallbackSave(key: string, item: any): void {
-    if (typeof localStorage === 'undefined') return;
+    if (typeof localStorage === "undefined") return;
     try {
       const raw = localStorage.getItem(`flashdrop_${key}`);
       const list = raw ? JSON.parse(raw) : [];
@@ -539,7 +691,7 @@ class LocalStorageService {
   }
 
   private async fallbackGetAll<T>(key: string): Promise<T[]> {
-    if (typeof localStorage === 'undefined') return [];
+    if (typeof localStorage === "undefined") return [];
     try {
       const raw = localStorage.getItem(`flashdrop_${key}`);
       return raw ? JSON.parse(raw) : [];

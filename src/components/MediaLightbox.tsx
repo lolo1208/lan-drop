@@ -1,16 +1,15 @@
 /**
- * LAN Drop 媒体灯箱（图片全屏预览、视频播放大屏查看器、音频播放器）
- * 专为 VS Code 2026 Dark Modern 风格定制：
- * 已彻底移除“保存到本地”功能，保留“打开所在目录”功能，精准定位到 [用户文档]/LAN Drop/Media 目录并高亮选中文件
+ * 媒体文件全屏预览模态窗组件
+ * 支持图片大图缩放查看、音视频高清内联播放与本地文件管理器定位
  */
 
-import React from 'react';
-import { FolderOpen, Music, X } from 'lucide-react';
-import { isTauri, ipc } from '../services/ipc';
+import React from "react";
+import { FolderOpen, Music, X } from "lucide-react";
+import { isTauri, ipc } from "../services/ipc";
 
 interface MediaLightboxProps {
   isOpen: boolean;
-  type: 'image' | 'video' | 'audio' | null;
+  type: "image" | "video" | "audio" | null;
   url: string | null;
   fileName: string;
   filePath?: string;
@@ -67,7 +66,7 @@ export const MediaLightbox: React.FC<MediaLightboxProps> = ({
       onOpenInFolder(targetPath, fileName);
     } else if (isTauri() && targetPath) {
       ipc.openInFolder(targetPath).catch((err) => {
-        console.error('打开所在目录失败:', err);
+        console.error("打开所在目录失败:", err);
       });
     }
   };
@@ -87,7 +86,11 @@ export const MediaLightbox: React.FC<MediaLightboxProps> = ({
             {fileName}
           </span>
           <span className="text-xs px-2 py-0.5 rounded-md bg-[#252526] border border-[#3c3c3c] text-[#858585]">
-            {type === 'image' ? '图片预览' : type === 'video' ? '视频回放' : '音频试听'}
+            {type === "image"
+              ? "图片预览"
+              : type === "video"
+                ? "视频回放"
+                : "音频试听"}
           </span>
         </div>
 
@@ -117,18 +120,18 @@ export const MediaLightbox: React.FC<MediaLightboxProps> = ({
         className="max-w-5xl max-h-[85vh] flex items-center justify-center overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-        {type === 'image' && (
+        {type === "image" && (
           <img
-            src={activeUrl || url || ''}
+            src={activeUrl || url || ""}
             alt={fileName}
             onError={handleMediaError}
             className="max-h-[82vh] max-w-full rounded-lg object-contain shadow-2xl transition-transform"
           />
         )}
 
-        {type === 'video' && (
+        {type === "video" && (
           <video
-            src={activeUrl || url || ''}
+            src={activeUrl || url || ""}
             controls
             autoPlay
             onError={handleMediaError}
@@ -136,7 +139,7 @@ export const MediaLightbox: React.FC<MediaLightboxProps> = ({
           />
         )}
 
-        {type === 'audio' && (
+        {type === "audio" && (
           <div className="bg-[#252526] border border-[#3c3c3c] rounded-2xl p-6 sm:p-8 shadow-2xl w-80 sm:w-96 flex flex-col items-center">
             <div className="w-20 h-20 rounded-full bg-[#094771] text-[#38bdf8] flex items-center justify-center mb-4 ring-4 ring-[#0078d4]/30 animate-pulse">
               <Music className="w-10 h-10" />
@@ -146,7 +149,7 @@ export const MediaLightbox: React.FC<MediaLightboxProps> = ({
             </div>
             <div className="text-xs text-[#858585] mb-6">音频文件播放器</div>
             <audio
-              src={activeUrl || url || ''}
+              src={activeUrl || url || ""}
               controls
               autoPlay
               onError={handleMediaError}

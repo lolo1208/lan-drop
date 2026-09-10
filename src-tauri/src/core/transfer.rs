@@ -1,4 +1,4 @@
-// LAN Drop (内网投送) - Tokio + Reqwest 磁盘流式推送（支持断点续传 offset）
+// Tokio + Reqwest 磁盘流式推送（支持断点续传 offset）
 use futures_util::StreamExt;
 use std::path::Path;
 use std::sync::Arc;

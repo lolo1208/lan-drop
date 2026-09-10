@@ -1,9 +1,9 @@
 /**
- * LAN Drop (内网投送) - 类型定义
- * 支持 Tauri v2 IPC 与 Web 双模式
+ * 全局通用 TypeScript 类型定义文件
+ * 声明对端设备信息、聊天消息格式、文件附件元数据、传输任务、配置项及系统常量
  */
 
-export type DeviceOS = 'macos' | 'windows' | 'linux' | 'android' | 'ios';
+export type DeviceOS = "macos" | "windows" | "linux" | "android" | "ios";
 
 export interface PeerDevice {
   id: string; // 唯一设备ID (UUID)
@@ -12,23 +12,24 @@ export interface PeerDevice {
   os: DeviceOS; // 操作系统类型
   ip: string; // 局域网 IPv4 地址
   port: number; // Axum HTTP 服务接收端口 (默认 57088)
-  status: 'online' | 'offline' | 'busy'; // 在线状态
+  status: "online" | "offline" | "busy"; // 在线状态
   lastSeen: number; // 最后心跳时间戳 (毫秒)
   pingMs: number; // 局域网延迟 (毫秒)
   version: string; // 客户端版本
   isLocal?: boolean; // 是否为当前本机
 }
 
-export type TransferDirection = 'send' | 'receive';
-export type TransferStatus = 'queued' | 'transferring' | 'paused' | 'completed' | 'failed' | 'cancelled';
+export type TransferDirection = "send" | "receive";
+export type TransferStatus =
+  "queued" | "transferring" | "paused" | "completed" | "failed" | "cancelled";
 
-export type FileTransferState = 
-  | 'waiting_accept' // 等待接收方点击“接收”
-  | 'transferring'   // 正在流式传输
-  | 'received'       // 已接收完成
-  | 'rejected'       // 已拒绝
-  | 'expired'        // 发送方离线无法接收
-  | 'failed';        // 传输失败
+export type FileTransferState =
+  | "waiting_accept" // 等待接收方点击“接收”
+  | "transferring" // 正在流式传输
+  | "received" // 已接收完成
+  | "rejected" // 已拒绝
+  | "expired" // 发送方离线无法接收
+  | "failed"; // 传输失败
 
 export interface TransferTask {
   localFilePath?: string;
@@ -84,9 +85,9 @@ export interface ChatMessage {
   senderIp?: string; // 发送方 IPv4
   senderPort?: number; // 发送方 Port (默认 57088)
   content: string; // 文本内容（如果是纯文件消息则可为文件名或附加说明）
-  msgType: 'text' | 'file' | 'image' | 'video' | 'audio' | 'system'; // 消息类型
+  msgType: "text" | "file" | "image" | "video" | "audio" | "system"; // 消息类型
   timestamp: number; // 发送时间
-  status: 'sending' | 'sent' | 'delivered' | 'failed'; // 状态
+  status: "sending" | "sent" | "delivered" | "failed"; // 状态
   fileAttachment?: FileAttachmentMeta;
   isRead?: boolean; // 消息是否已读
   readTimestamp?: number; // 已读时间戳

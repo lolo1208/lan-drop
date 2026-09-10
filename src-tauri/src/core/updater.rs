@@ -1,10 +1,10 @@
-// LAN Drop (内网投送) - 局域网 Master 自更新与热替换模块
+// 局域网 Master 自更新与热替换模块
 // 机制：
 // 1. 任何客户端均可作为 Master 机器，在其 "[用户文档]/LAN Drop/Update/" 目录下放置 version.cfg (如 "2.0.1") 与可执行文件 (lan-drop.exe / lan-drop)
 // 2. 客户端配置 Master IP 后，启动时及每 30 分钟静默检测，发现版本不符自动下载并执行自替换与无缝重启
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 pub const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -258,7 +258,7 @@ fn execute_self_replace_and_restart(
         }
 
         // 2. 将 Temp 目录下的新下载二进制文件替换到 current_exe 路径，保持用户原程序名称（如 "内网工具.exe"）
-        if let Err(e) = std::fs::rename(download_file, current_exe) {
+        if let Err(_e) = std::fs::rename(download_file, current_exe) {
             // 若跨卷 rename 失败，采用 copy + remove 覆盖
             if let Err(e2) = std::fs::copy(download_file, current_exe).and_then(|_| std::fs::remove_file(download_file)) {
                 // 替换失败，紧急将旧文件还原
