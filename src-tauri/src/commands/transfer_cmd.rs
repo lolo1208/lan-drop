@@ -130,7 +130,7 @@ pub async fn transfer_file_data(
             Ok(r) => {
                 let status = r.status();
                 let err_text = r.text().await.unwrap_or_default();
-                log::error!("对端流式接口返回异常状态 {}: {}", status, err_text);
+                log::error!("对端流式接口返回异常状态 {}", status);
                 let _ = app.emit("transfer://error", serde_json::json!({
                     "taskId": task_id,
                     "error": format!("状态异常: {} - {}", status, err_text)
@@ -155,4 +155,3 @@ pub async fn get_partial_file_size(file_name: String, state: State<'_, AppState>
     let size = server::query_partial_file_size(&download_dir, &file_name).await;
     Ok(size)
 }
-

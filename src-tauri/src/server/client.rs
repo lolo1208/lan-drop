@@ -62,22 +62,23 @@ pub async fn send_http_message(
         .unwrap_or_else(|_| reqwest::Client::new());
 
     let url = format!("http://{}:{}/api/message", clean_ip, port);
-    log::info!("正在向对端发送 HTTP 消息: {}", url);
     let resp = client
         .post(&url)
         .header("Content-Type", "application/json")
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("无法连接对端 ({}): {}", url, e))?;
+        .map_err(|e| {
+            log::error!("[消息发送失败] 地址={}，原因={}", url, e);
+            format!("无法连接对端 ({}): {}", url, e)
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        log::error!("对端返回错误响应 {}: {}", status, body);
+        log::error!("[消息发送失败] 地址={}，HTTP 状态={}", url, status);
         return Err(format!("对端响应状态码 {}: {}", status, body));
     }
 
-    log::info!("对端 {} 响应 HTTP 状态码: {}", url, resp.status());
     Ok(())
 }

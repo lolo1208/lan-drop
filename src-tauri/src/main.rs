@@ -20,7 +20,8 @@ pub use system::*;
 use state::AppState;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::ShortcutState;
+use system::hotkeys::{HotkeyState, dispatch_hotkey, initialize_hotkeys};
 use tokio::sync::RwLock;
 
 #[tokio::main]
@@ -28,14 +29,14 @@ async fn main() {
     // 0. 单实例运行控制：保证程序同时只可以运行一个，重复双击启动时自动唤醒后台已有窗口并直接退出
     let single_instance_listener = ensure_single_instance();
 
-    tracing_subscriber::fmt::init();
-
     // 1. 初始化 SQLite 数据库与获取持久化设备唯一标识
     // 数据库路径规范："[用户文档]/LAN Drop/data.db"
     let lan_drop_dir = dirs::document_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("LAN Drop");
     let _ = std::fs::create_dir_all(&lan_drop_dir);
+
+    system::logging::init_logging();
 
     let db_path = lan_drop_dir.join("data.db");
     let old_db_path = lan_drop_dir.join("lan_drop.db");
@@ -73,7 +74,7 @@ async fn main() {
             let rand_num = (uuid::Uuid::new_v4().as_u128() % 11) as u8;
             let random_avatar = rand_num.to_string();
             let _ = database.set_kv("avatar_url", &random_avatar);
-            log::info!("首次启动应用，已为用户随机抽取并保存默认头像 ID: {}", random_avatar);
+            log::debug!("首次启动应用，已为用户随机抽取并保存默认头像 ID: {}", random_avatar);
             random_avatar
         }
     };
@@ -111,6 +112,8 @@ async fn main() {
     };
 
     let local_state = Arc::new(RwLock::new(local_info.clone()));
+    log::info!("[网络启动] PID={}，ID={}，地址={}:{}", std::process::id(),
+        local_info.id, local_info.ip, local_info.port);
 
     let default_doc_dir_path = dirs::document_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -131,14 +134,15 @@ async fn main() {
     let download_dir = Arc::new(RwLock::new(final_download_dir));
 
     tauri::Builder::default()
+        .manage(HotkeyState::default())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
-                        log::info!("底层操作系统捕获到全局热键: {:?}", shortcut);
-                        toggle_main_window(app);
+                        log::debug!("底层操作系统捕获到全局热键: {:?}", shortcut);
+                        dispatch_hotkey(app, shortcut);
                     }
                 })
                 .build(),
@@ -147,6 +151,8 @@ async fn main() {
             db: database.clone(),
             local_device: local_state.clone(),
             download_dir: download_dir.clone(),
+            known_peers: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            discovery_scan_lock: tokio::sync::Mutex::new(()),
         })
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -162,7 +168,7 @@ async fn main() {
                             use tokio::io::AsyncReadExt;
                             if let Ok(n) = socket.read(&mut buf).await {
                                 if n > 0 {
-                                    log::info!("收到单实例唤醒消息，自动恢复置顶主窗口");
+                                    log::debug!("收到单实例唤醒消息，自动恢复置顶主窗口");
                                     if let Some(window) = single_handle.get_webview_window("main") {
                                         let _ = window.show();
                                         let _ = window.unminimize();
@@ -219,7 +225,7 @@ async fn main() {
                             && clean_ip != "127.0.0.1"
                             && clean_ip != "localhost"
                         {
-                            log::info!("正在静默检查 Master 局域网更新源: {}", clean_ip);
+                            log::debug!("正在静默检查 Master 局域网更新源: {}", clean_ip);
                             let _ = updater::check_and_perform_update(&update_handle, clean_ip, false).await;
                         }
                     }
@@ -227,21 +233,8 @@ async fn main() {
                 }
             });
 
-            // 5. 注册 OS 系统级全局唤醒快捷键（默认为 "Ctrl+Alt+Shift+S"）
-            let initial_hotkey = database
-                .get_kv("global_hotkey")
-                .ok()
-                .flatten()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| "Ctrl+Alt+Shift+S".to_string());
-
-            let normalized = parse_shortcut_str(&initial_hotkey);
-            if !normalized.is_empty() {
-                if let Ok(shortcut) = normalized.parse::<Shortcut>() {
-                    let _ = handle.global_shortcut().register(shortcut);
-                    log::info!("系统初始化完成：成功注册 OS 系统级全局唤醒快捷键: {}", normalized);
-                }
-            }
+            // 5. 分别恢复窗口唤醒和截图热键，一项被占用不影响另一项。
+            initialize_hotkeys(&handle, &database);
 
             #[cfg(debug_assertions)]
             {

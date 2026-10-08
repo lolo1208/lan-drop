@@ -125,11 +125,12 @@ export async function initTauriBridge(ipc: IPCService) {
 
     // 监听设备离线
     await safeListen("peer://offline", (event: any) => {
+      console.warn("[设备离线] 后端保活判定：", event.payload);
       const id = event.payload?.id;
       const ip = event.payload?.ip;
       let changed = false;
       ipc.virtualPeers.forEach((p) => {
-        if ((id && p.id === id) || (ip && p.ip === ip)) {
+        if (id ? p.id === id : ip && p.ip === ip) {
           if (p.status !== "offline") {
             p.status = "offline";
             changed = true;
@@ -202,20 +203,7 @@ export async function initTauriBridge(ipc: IPCService) {
       await ipc.toggleWindow();
     });
 
-    // 2. 定期检测设备在线状态 (超过 25 秒未收到心跳则标记离线)
-    setInterval(() => {
-      const now = Date.now();
-      let changed = false;
-      ipc.virtualPeers.forEach((p) => {
-        if (p.status === "online" && now - (p.lastSeen || 0) > 25000) {
-          p.status = "offline";
-          changed = true;
-        }
-      });
-      if (changed) {
-        ipc.emit("peers://updated", [...ipc.virtualPeers]);
-      }
-    }, 5000);
+    // 桌面端由后端 HTTP 保活统一判定离线，避免扫描耗时引起前端超时误判。
 
     // 3. 从 SQLite .db / localStorage 加载全部持久化配置
     const dbConfig = await storageService.loadSettingsFromDb();
@@ -228,6 +216,7 @@ export async function initTauriBridge(ipc: IPCService) {
     }
 
     const localDevice = await invoke<any>("get_local_device");
+    if (localDevice?.port) ipc.localConfig.port = localDevice.port;
     if (
       localDevice &&
       localDevice.ip &&

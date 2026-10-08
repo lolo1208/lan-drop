@@ -78,8 +78,15 @@ pub async fn start_axum_server(
         .with_state(Arc::new(ctx));
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    log::info!("Axum 接收服务端已在 {} 启动", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("绑定 Axum 端口失败");
-    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.expect("Axum 服务运行异常");
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            log::error!("[监听失败] 地址={}，原因={}；本机无法接收探测与消息，请检查端口占用", addr, error);
+            return;
+        }
+    };
+    log::info!("[监听就绪] Axum 接收服务端地址={}", addr);
+    if let Err(error) = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await {
+        log::error!("[监听异常] 地址={}，原因={}", addr, error);
+    }
 }

@@ -9,12 +9,14 @@ import { TrayOverlay } from "./components/TrayOverlay";
 import { MediaLightbox } from "./components/MediaLightbox";
 import { SettingsModal } from "./components/SettingsModal";
 import { Sidebar } from "./components/Sidebar";
+import { TitleBar } from "./components/TitleBar";
 import { ipc, isTauri } from "./services/ipc";
 import { setDefaultDocumentsCache, storageService } from "./services/storage";
 import { LocalDeviceConfig, PeerDevice } from "./types";
 import { buildConversations, usePeerSync } from "./hooks/usePeerSync";
 import { useChatSync } from "./hooks/useChatSync";
 import { useSystemTray } from "./hooks/useSystemTray";
+import { useScreenshot } from "./hooks/useScreenshot";
 
 export function App() {
   const [config, setConfig] = useState<LocalDeviceConfig>(() =>
@@ -162,6 +164,8 @@ export function App() {
     onTriggerHighlight: triggerMessageHighlight,
   });
 
+  const screenshot = useScreenshot({ selectedPeer, onSelectPeer: setSelectedPeer, showToast });
+
   // 系统托盘与后台常驻
   const { isHiddenToTray, notifyIncomingMessage } = useSystemTray({
     config,
@@ -251,48 +255,58 @@ export function App() {
   };
 
   return (
-    <div className="flex h-screen w-screen bg-[#1e1e1e] text-[#cccccc] font-sans antialiased overflow-hidden select-none">
+    <div className="flex flex-col h-screen w-screen bg-[#1e1e1e] text-[#cccccc] font-sans antialiased overflow-hidden select-none">
+      <TitleBar onError={showToast} />
       {/* 顶部全局提示 Toast */}
       {folderToast && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-[#252526] border border-[#0078d4] text-white text-xs rounded-xl shadow-2xl flex items-center space-x-2 animate-in fade-in slide-in-from-top duration-200">
+        <div className="fixed top-12 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-[#252526] border border-[#0078d4] text-white text-xs rounded-xl shadow-2xl flex items-center space-x-2 animate-in fade-in slide-in-from-top duration-200">
           <span className="w-2 h-2 rounded-full bg-[#0078d4] animate-ping" />
           <span>{folderToast}</span>
         </div>
       )}
 
       {/* 左侧设备与联系人会话列表 */}
-      <Sidebar
-        conversations={conversations}
-        allChats={allChats}
-        activePeerId={selectedPeer?.id || null}
-        currentUserId={config.id}
-        onSelectPeer={handleSelectPeer}
-        onOpenSettings={handleOpenSettingsModal}
-        localName={config.name}
-        localIp={config.ip}
-        localAvatarUrl={config.avatarUrl}
-      />
-
-      {/* 右侧聊天与文件传输主面板 */}
-      <div className="flex-1 flex flex-col h-full min-w-0 bg-[#1e1e1e]">
-        <ChatPanel
-          peer={selectedPeer}
-          messages={chatMessages}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        <Sidebar
+          conversations={conversations}
+          allChats={allChats}
+          activePeerId={selectedPeer?.id || null}
           currentUserId={config.id}
-          currentUserIp={config.ip}
-          currentUserAvatarUrl={config.avatarUrl}
-          highlightMessageId={highlightMessageId}
-          onSendMessage={handleSendMessage}
-          onSendFile={handleSendFile}
-          onAcceptFile={handleAcceptFile}
-          onResumeFile={handleResumeFile}
-          onDeleteMessage={handleDeleteMessage}
-          onDeleteMessages={handleDeleteMessages}
-          onClearChat={handleClearPeerChat}
-          onOpenInFolder={handleOpenInFolder}
-          onPreviewMedia={handlePreviewMedia}
-          onMarkPeerRead={handleMarkPeerRead}
+          onSelectPeer={handleSelectPeer}
+          onOpenSettings={handleOpenSettingsModal}
+          localName={config.name}
+          localIp={config.ip}
+          localAvatarUrl={config.avatarUrl}
         />
+
+        {/* 右侧聊天与文件传输主面板 */}
+        <div className="flex-1 flex flex-col h-full min-w-0 bg-[#1e1e1e]">
+          <ChatPanel
+            screenshotDrafts={selectedPeer ? screenshot.drafts[selectedPeer.id] ?? [] : []}
+            onScreenshot={screenshot.startScreenshot}
+            screenshotSupported={screenshot.supported}
+            isCapturing={screenshot.isCapturing}
+            screenshotHotkey={config.screenshotHotkey ?? "Ctrl+Alt+Shift+A"}
+            onRemoveScreenshot={screenshot.removeDraft}
+            onToast={showToast}
+            peer={selectedPeer}
+            messages={chatMessages}
+            currentUserId={config.id}
+            currentUserIp={config.ip}
+            currentUserAvatarUrl={config.avatarUrl}
+            highlightMessageId={highlightMessageId}
+            onSendMessage={handleSendMessage}
+            onSendFile={handleSendFile}
+            onAcceptFile={handleAcceptFile}
+            onResumeFile={handleResumeFile}
+            onDeleteMessage={handleDeleteMessage}
+            onDeleteMessages={handleDeleteMessages}
+            onClearChat={handleClearPeerChat}
+            onOpenInFolder={handleOpenInFolder}
+            onPreviewMedia={handlePreviewMedia}
+            onMarkPeerRead={handleMarkPeerRead}
+          />
+        </div>
       </div>
 
       {/* 设置模态框 */}
@@ -311,6 +325,7 @@ export function App() {
         url={lightbox.url}
         fileName={lightbox.fileName}
         filePath={lightbox.filePath}
+        showOpenInFolder={!Object.values(screenshot.drafts).some((list) => list.some((draft) => draft.previewUrl === lightbox.url))}
         onOpenInFolder={handleOpenInFolder}
         onClose={() => setLightbox((prev) => ({ ...prev, isOpen: false }))}
       />
@@ -318,7 +333,7 @@ export function App() {
       {/* 托盘后台挂起状态蒙层（使用独立组件 TrayOverlay） */}
       {isHiddenToTray && (
         <TrayOverlay
-          globalHotkey={configRef.current?.globalHotkey || "Ctrl+Alt+Shift+S"}
+          globalHotkey={configRef.current?.globalHotkey ?? "Ctrl+Alt+Shift+S"}
         />
       )}
     </div>

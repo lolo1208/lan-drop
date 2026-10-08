@@ -74,28 +74,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const filteredConversations = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return conversations
-      .filter((c) => {
-        if (!q) return true;
-        return (
-          c.peer.name.toLowerCase().includes(q) ||
-          c.peer.ip.includes(q) ||
-          (c.lastMessage?.content || "").toLowerCase().includes(q)
-        );
-      })
-      .sort((a, b) => {
-        const timeA = a.lastMessage?.timestamp || 0;
-        const timeB = b.lastMessage?.timestamp || 0;
-        if (timeB !== timeA) {
-          return timeB - timeA;
-        }
-        if (a.peer.status !== b.peer.status) {
-          return a.peer.status === "online" ? -1 : 1;
-        }
-        const nameCompare = a.peer.name.localeCompare(b.peer.name, "zh-CN");
-        if (nameCompare !== 0) return nameCompare;
-        return a.peer.id.localeCompare(b.peer.id);
-      });
+    // 会话已按在线状态、最近消息和名称排序；搜索只过滤，保留原顺序。
+    return conversations.filter((c) => {
+      if (!q) return true;
+      return (
+        c.peer.name.toLowerCase().includes(q) ||
+        c.peer.ip.includes(q) ||
+        (c.lastMessage?.content || "").toLowerCase().includes(q)
+      );
+    });
   }, [conversations, search]);
 
   const matchedFileMessages = useMemo(() => {

@@ -8,4 +8,6 @@ pub struct AppState {
     pub db: Arc<db::Database>,
     pub local_device: Arc<RwLock<discovery::DeviceInfo>>,
     pub download_dir: Arc<RwLock<String>>,
+    pub known_peers: Arc<tokio::sync::Mutex<std::collections::HashMap<String, discovery::PeerHealth>>>,
+    pub discovery_scan_lock: tokio::sync::Mutex<()>,
 }

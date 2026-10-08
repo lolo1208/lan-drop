@@ -115,6 +115,7 @@ export interface LocalDeviceConfig {
   updateUrl?: string; // 系统更新地址（局域网 url，启动时检查，存在新版本时自动更新）
   autoStart?: boolean; // 开机启动（开关，默认关闭）
   globalHotkey?: string; // 全局呼出唤醒快捷键 (如 'Alt+Space')
+  screenshotHotkey?: string; // 全局区域截图快捷键，空字符串表示禁用
 }
 
 export interface RustCodeSnippet {

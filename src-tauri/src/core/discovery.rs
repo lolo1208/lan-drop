@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
 
 pub const DEFAULT_PORT: u16 = 57088;
@@ -94,26 +94,30 @@ pub fn get_all_subnet_ips(preferred_ip: &str) -> Vec<String> {
 }
 
 /// 针对单个 IP 和端口发起 HTTP GET /api/info 探测（纯 HTTP 机制，轻量单次握手）
-pub async fn probe_single_peer(
-    client: &reqwest::Client,
-    target_ip: &str,
-    target_port: u16,
-) -> Option<DeviceInfo> {
-    let url = format!("http://{}:{}/api/info", target_ip, target_port);
-    let resp = client.get(&url).send().await.ok()?;
-    if resp.status().is_success() {
-        if let Ok(mut dev) = resp.json::<DeviceInfo>().await {
-            // 确保 IP 字段记录对端真实的连接 IP
-            if dev.ip.is_empty() || dev.ip == "127.0.0.1" || dev.ip == "0.0.0.0" || !dev.ip.contains('.') {
-                dev.ip = target_ip.to_string();
-            }
-            if dev.port == 0 {
-                dev.port = target_port;
-            }
-            return Some(dev);
-        }
+async fn probe_peer_result(client: &reqwest::Client, ip: &str, port: u16) -> Result<DeviceInfo, String> {
+    let url = format!("http://{}:{}/api/info", ip, port);
+    let response = client.get(&url).send().await.map_err(|e| {
+        if e.is_timeout() { "连接或请求超时".to_string() } else { format!("连接失败：{e}") }
+    })?;
+    let response = response.error_for_status().map_err(|e| format!("HTTP 状态异常：{e}"))?;
+    let mut dev = response.json::<DeviceInfo>().await.map_err(|e| format!("响应格式无效：{e}"))?;
+    if dev.id.trim().is_empty() { return Err("响应缺少设备 ID".into()); }
+    // 公告地址可能属于另一张网卡，以实际成功连接的地址和端口为准。
+    dev.ip = ip.to_string();
+    dev.port = port;
+    Ok(dev)
+}
+
+pub async fn probe_single_peer(client: &reqwest::Client, ip: &str, port: u16) -> Option<DeviceInfo> {
+    probe_peer_result(client, ip, port).await.ok()
+}
+
+fn discovery_ports(local_port: u16) -> Vec<u16> {
+    let mut ports = vec![DEFAULT_PORT];
+    for port in [local_port, 7890] {
+        if !ports.contains(&port) { ports.push(port); }
     }
-    None
+    ports
 }
 
 /// 执行局域网平滑高效 HTTP 扫描
@@ -122,13 +126,18 @@ pub async fn scan_subnet_peers(
     app: &AppHandle,
     local_device: &Arc<RwLock<DeviceInfo>>,
 ) -> Vec<DeviceInfo> {
+    // 手动扫描与后台扫描串行执行，避免启动时叠加全网并发。
+    let state = app.state::<crate::state::AppState>();
+    let _scan_guard = state.discovery_scan_lock.lock().await;
     let (my_id, my_ip, my_port) = {
         let dev = local_device.read().await;
         let port = if dev.port > 0 { dev.port } else { DEFAULT_PORT };
         (dev.id.clone(), dev.ip.clone(), port)
     };
 
+    let started = Instant::now();
     let ips = get_all_subnet_ips(&my_ip);
+    log::debug!("[扫描开始] 本机IP={}，目标数={}，端口={:?}", my_ip, ips.len(), discovery_ports(my_port));
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_millis(600))
@@ -149,37 +158,12 @@ pub async fn scan_subnet_peers(
             let found_devices = found_devices.clone();
 
             async move {
-                // 探测当前主要端口 (57088)
-                if let Some(peer) = probe_single_peer(&client, &ip, my_port).await {
-                    if peer.id != my_id {
-                        let _ = app.emit(
-                            "peer://discovered",
-                            serde_json::json!({
-                                "peer": peer,
-                                "remoteIp": peer.ip,
-                                "timestamp": chrono::Utc::now().timestamp_millis()
-                            }),
-                        );
-                        let mut list = found_devices.lock().await;
-                        list.push(peer);
-                        return;
-                    }
-                }
-
-                // 若默认端口未探测到，且 my_port != 7890，尝试探测备用端口 7890
-                if my_port != 7890 {
-                    if let Some(peer) = probe_single_peer(&client, &ip, 7890).await {
+                for port in discovery_ports(my_port) {
+                    if let Some(peer) = probe_single_peer(&client, &ip, port).await {
                         if peer.id != my_id {
-                            let _ = app.emit(
-                                "peer://discovered",
-                                serde_json::json!({
-                                    "peer": peer,
-                                    "remoteIp": peer.ip,
-                                    "timestamp": chrono::Utc::now().timestamp_millis()
-                                }),
-                            );
-                            let mut list = found_devices.lock().await;
-                            list.push(peer);
+                            register_peer(&app, peer.clone()).await;
+                            found_devices.lock().await.push(peer);
+                            break;
                         }
                     }
                 }
@@ -190,89 +174,148 @@ pub async fn scan_subnet_peers(
         .await;
 
     let res = found_devices.lock().await.clone();
+    log::debug!("[扫描完成] 耗时={}ms，发现设备数={}", started.elapsed().as_millis(), res.len());
     res
 }
 
-/// 运行后台轻量发现守护线程
-/// 策略：
-/// 1. 启动延时 200ms 后立刻执行第 1 次全网秒级扫描；
-/// 2. 日常每 5 秒对“已知发现的设备”进行轻量保活探测；
-/// 3. 每 15 秒执行一次全局增量扫描，确保新加入设备秒级发现。
+/// 扫描和手动添加共用保活状态；离线设备保留用于自动重连。
+#[derive(Debug)]
+pub struct PeerHealth {
+    pub device: DeviceInfo,
+    last_success: Instant,
+    failures: u8,
+    online: bool,
+}
+
+impl PeerHealth {
+    fn new(device: DeviceInfo) -> Self {
+        Self { device, last_success: Instant::now(), failures: 0, online: true }
+    }
+
+    fn record_failure(&mut self, started: Instant) -> bool {
+        // 探测期间有更新的成功记录时，忽略过时的失败。
+        if self.last_success > started { return false; }
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= 3 && self.online {
+            self.online = false;
+            return true;
+        }
+        false
+    }
+}
+
+pub async fn register_peer(app: &AppHandle, peer: DeviceInfo) {
+    let state = app.state::<crate::state::AppState>();
+    let mut known = state.known_peers.lock().await;
+    if known.get(&peer.id).map_or(true, |old| !old.online || old.device.ip != peer.ip || old.device.port != peer.port) {
+        log::info!("[设备上线] ID={}，地址={}:{}", peer.id, peer.ip, peer.port);
+    }
+    known.insert(peer.id.clone(), PeerHealth::new(peer.clone()));
+    let _ = app.emit("peer://discovered", serde_json::json!({
+        "peer": peer, "remoteIp": peer.ip, "timestamp": chrono::Utc::now().timestamp_millis()
+    }));
+}
+
+/// 保活与扫描独立调度，扫描耗时不延迟已知设备状态检测。
 pub async fn run_http_discovery_daemon(app: AppHandle, local_device: Arc<RwLock<DeviceInfo>>) {
-    // 等待本地 Axum 服务启动就绪
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // 首次启动立即执行全网扫描
-    let initial_found = scan_subnet_peers(&app, &local_device).await;
-    let known_ips = Arc::new(RwLock::new(
-        initial_found.into_iter().map(|d| d.ip).collect::<HashSet<String>>()
-    ));
-
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_millis(600))
-        .connect_timeout(Duration::from_millis(300))
-        .tcp_nodelay(true)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let mut tick_count: u32 = 0;
+    let scan_app = app.clone();
+    tokio::spawn(async move {
+        let mut scans = tokio::time::interval(Duration::from_secs(15));
+        scans.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            scans.tick().await;
+            scan_subnet_peers(&scan_app, &local_device).await;
+        }
+    });
+    let client = reqwest::Client::builder().no_proxy()
+        .timeout(Duration::from_millis(2500)).connect_timeout(Duration::from_millis(1500))
+        .tcp_nodelay(true).build().expect("创建保活 HTTP 客户端失败");
     let mut interval = tokio::time::interval(Duration::from_secs(5));
-
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        tick_count = tick_count.wrapping_add(1);
-
-        // 每 3 个周期（即 15 秒）执行一次全局秒级发现
-        if tick_count % 3 == 0 {
-            let found = scan_subnet_peers(&app, &local_device).await;
-            let current_ips: HashSet<String> = found.iter().map(|d| d.ip.clone()).collect();
-            let mut known = known_ips.write().await;
-            // 找出此前在线但当前扫描未响应的设备，及时发出离线事件
-            for old_ip in known.iter() {
-                if !current_ips.contains(old_ip) {
-                    let _ = app.emit(
-                        "peer://offline",
-                        serde_json::json!({
-                            "ip": old_ip,
-                            "timestamp": chrono::Utc::now().timestamp_millis()
-                        }),
-                    );
-                }
-            }
-            *known = current_ips;
-        } else {
-            // 平常仅对已知在线列表进行精准极轻量保活探测
-            let (targets, my_id, my_port) = {
-                let known = known_ips.read().await;
-                let dev = local_device.read().await;
-                let p = if dev.port > 0 { dev.port } else { DEFAULT_PORT };
-                (known.iter().cloned().collect::<Vec<String>>(), dev.id.clone(), p)
-            };
-
-            for ip in targets {
-                if let Some(peer) = probe_single_peer(&client, &ip, my_port).await {
-                    if peer.id != my_id {
-                        let _ = app.emit(
-                            "peer://discovered",
-                            serde_json::json!({
-                                "peer": peer,
-                                "remoteIp": peer.ip,
-                                "timestamp": chrono::Utc::now().timestamp_millis()
-                            }),
-                        );
+        let targets = {
+            let state = app.state::<crate::state::AppState>();
+            let known = state.known_peers.lock().await;
+            known.values().map(|health| health.device.clone()).collect::<Vec<_>>()
+        };
+        stream::iter(targets).map(|target| {
+            let client = client.clone();
+            let app = app.clone();
+            async move {
+                let started = Instant::now();
+                let reason = match probe_peer_result(&client, &target.ip, target.port).await {
+                    Ok(peer) if peer.id == target.id => { register_peer(&app, peer).await; return; }
+                    Ok(peer) => format!("设备 ID 不匹配：实际={}", peer.id),
+                    Err(error) => error,
+                };
+                let state = app.state::<crate::state::AppState>();
+                let mut known = state.known_peers.lock().await;
+                if let Some(health) = known.get_mut(&target.id) {
+                    let offline = health.record_failure(started);
+                    if offline {
+                        log::warn!("[设备离线] ID={}，地址={}:{}，连续失败={}，原因={}",
+                            target.id, target.ip, target.port, health.failures, reason);
+                        let _ = app.emit("peer://offline", serde_json::json!({
+                            "id": target.id, "ip": target.ip, "reason": reason,
+                            "failures": health.failures, "timestamp": chrono::Utc::now().timestamp_millis()
+                        }));
                     }
-                } else {
-                    // 该对端设备未响应，发出离线通知
-                    let _ = app.emit(
-                        "peer://offline",
-                        serde_json::json!({
-                            "ip": ip,
-                            "timestamp": chrono::Utc::now().timestamp_millis()
-                        }),
-                    );
                 }
             }
-        }
+        }).buffer_unordered(8).collect::<Vec<_>>().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device() -> DeviceInfo {
+        DeviceInfo { id: "test-peer".into(), name: "测试设备".into(), ip: "127.0.0.1".into(),
+            port: 7890, os: "windows".into(), avatar_url: String::new() }
+    }
+
+    #[test]
+    fn offline_requires_three_failures_and_emits_once() {
+        let mut health = PeerHealth::new(device());
+        let started = Instant::now();
+        assert!(!health.record_failure(started));
+        assert!(!health.record_failure(started));
+        assert!(health.record_failure(started));
+        assert!(!health.record_failure(started));
+    }
+
+    #[test]
+    fn newer_success_discards_stale_failure_and_resets_count() {
+        let mut health = PeerHealth::new(device());
+        let started = Instant::now();
+        health.record_failure(started);
+        health = PeerHealth::new(device());
+        assert!(!health.record_failure(started));
+        assert_eq!(health.failures, 0);
+        assert!(health.online);
+    }
+
+    #[test]
+    fn scans_default_port_even_when_local_port_is_custom() {
+        assert_eq!(discovery_ports(58000), vec![57088, 58000, 7890]);
+        assert_eq!(discovery_ports(57088), vec![57088, 7890]);
+        assert_eq!(discovery_ports(7890), vec![57088, 7890]);
+    }
+
+    #[tokio::test]
+    async fn probe_uses_reachable_endpoint_instead_of_advertised_address() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = axum::Router::new().route("/api/info", axum::routing::get(|| async {
+            axum::Json(DeviceInfo { ip: "10.99.0.1".into(), port: 58000, ..device() })
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+        let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build().unwrap();
+        let peer = probe_single_peer(&client, "127.0.0.1", port).await.unwrap();
+        assert_eq!(peer.ip, "127.0.0.1");
+        assert_eq!(peer.port, port);
+        server.abort();
     }
 }

@@ -517,7 +517,8 @@ class LocalStorageService {
               dbSettings.autoStart !== undefined ? dbSettings.autoStart : false,
             updateUrl: dbSettings.updateUrl || "",
             globalHotkey:
-              (dbSettings as any).globalHotkey || "Ctrl+Alt+Shift+S",
+              dbSettings.globalHotkey ?? "Ctrl+Alt+Shift+S",
+            screenshotHotkey: dbSettings.screenshotHotkey ?? "Ctrl+Alt+Shift+A",
             multicastGroup: "239.255.42.99:7432",
             autoAccept: false,
             heartbeatInterval: 10,
@@ -562,6 +563,7 @@ class LocalStorageService {
       downloadDir: defaultPath,
       autoStart: false,
       globalHotkey: "Ctrl+Alt+Shift+S",
+      screenshotHotkey: "Ctrl+Alt+Shift+A",
       updateUrl: "",
       multicastGroup: "239.255.42.99:7432",
       autoAccept: false,
@@ -602,6 +604,8 @@ class LocalStorageService {
             autoStart:
               parsed.autoStart !== undefined ? parsed.autoStart : false,
             updateUrl: parsed.updateUrl || "",
+            globalHotkey: parsed.globalHotkey ?? "Ctrl+Alt+Shift+S",
+            screenshotHotkey: parsed.screenshotHotkey ?? "Ctrl+Alt+Shift+A",
             multicastGroup: "239.255.42.99:7432",
             autoAccept: false,
             heartbeatInterval: 10,
@@ -663,7 +667,8 @@ class LocalStorageService {
               updatedConfig.autoStart !== undefined
                 ? updatedConfig.autoStart
                 : false,
-            globalHotkey: updatedConfig.globalHotkey || "Alt+Space",
+            globalHotkey: updatedConfig.globalHotkey ?? "Ctrl+Alt+Shift+S",
+            screenshotHotkey: updatedConfig.screenshotHotkey ?? "Ctrl+Alt+Shift+A",
           },
         }).catch((err) => {
           console.warn("保存设置到 SQLite .db 失败:", err);

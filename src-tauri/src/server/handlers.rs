@@ -139,15 +139,14 @@ pub async fn handle_incoming_message(
     let client_ip = connect_info
         .map(|ci| ci.ip().to_string())
         .unwrap_or_default();
-    log::info!("收到来自 [{}] 的局域网即时消息/信令: {:?}", client_ip, payload);
 
-    // 确保 senderIp 字段被真实连接 IP 兜底填充
+    // 优先使用实际连接 IP，避免多网卡公告地址不可达。
     let current_sender_ip = payload
         .get("senderIp")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     
-    let effective_sender_ip = if (current_sender_ip.is_empty() || current_sender_ip == "127.0.0.1" || current_sender_ip == "0.0.0.0") && !client_ip.is_empty() {
+    let effective_sender_ip = if !client_ip.is_empty() {
         payload["senderIp"] = serde_json::json!(&client_ip);
         client_ip.clone()
     } else {
@@ -156,7 +155,7 @@ pub async fn handle_incoming_message(
 
     if let Some(file_att) = payload.get_mut("fileAttachment") {
         let f_ip = file_att.get("senderIp").and_then(|v| v.as_str()).unwrap_or("");
-        if (f_ip.is_empty() || f_ip == "127.0.0.1" || f_ip == "0.0.0.0") && !effective_sender_ip.is_empty() {
+        if !effective_sender_ip.is_empty() && f_ip != effective_sender_ip {
             file_att["senderIp"] = serde_json::json!(&effective_sender_ip);
         }
     }
@@ -192,14 +191,7 @@ pub async fn handle_incoming_message(
                 os: "windows".into(),
                 avatar_url: sender_avatar.to_string(),
             };
-            let _ = ctx.app.emit(
-                "peer://discovered",
-                serde_json::json!({
-                    "peer": peer,
-                    "remoteIp": effective_sender_ip,
-                    "timestamp": chrono::Utc::now().timestamp_millis()
-                }),
-            );
+            crate::discovery::register_peer(&ctx.app, peer).await;
         }
     }
 
@@ -344,7 +336,7 @@ pub async fn handle_stream_transfer(
             if existing_dest.exists() {
                 if let Ok(meta) = std::fs::metadata(&existing_dest) {
                     if meta.len() == params.file_size {
-                        log::info!("媒体文件已存在于本地且大小一致，跳过重复写入: {:?}", existing_dest);
+                        log::debug!("媒体文件已存在于本地且大小一致，跳过重复写入: {:?}", existing_dest);
                         let _ = ctx.app.emit("transfer://incoming_complete", serde_json::json!({
                             "taskId": params.task_id,
                             "fileName": safe_file_name,

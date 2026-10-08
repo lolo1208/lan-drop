@@ -128,8 +128,12 @@ export function buildConversations(
         if (peer.ip && counterpartIp === peer.ip) return true;
         return false;
       });
-      const lastMessage =
-        peerMsgs.length > 0 ? peerMsgs[peerMsgs.length - 1] : undefined;
+      // 按时间取最新消息，避免消息加载顺序影响摘要和联系人排序。
+      const lastMessage = peerMsgs.reduce<ChatMessage | undefined>(
+        (latest, msg) =>
+          !latest || msg.timestamp >= latest.timestamp ? msg : latest,
+        undefined,
+      );
       return {
         peer,
         lastMessage,
@@ -138,13 +142,17 @@ export function buildConversations(
       };
     })
     .sort((a, b) => {
+      // 连续列表：在线优先，同状态下有聊天记录的按最近消息排序。
+      const onlineA = a.peer.status === "online";
+      const onlineB = b.peer.status === "online";
+      if (onlineA !== onlineB) return onlineA ? -1 : 1;
+      if (Boolean(a.lastMessage) !== Boolean(b.lastMessage)) {
+        return a.lastMessage ? -1 : 1;
+      }
       const timeA = a.lastMessage?.timestamp || 0;
       const timeB = b.lastMessage?.timestamp || 0;
       if (timeB !== timeA) {
         return timeB - timeA;
-      }
-      if (a.peer.status !== b.peer.status) {
-        return a.peer.status === "online" ? -1 : 1;
       }
       const nameCompare = a.peer.name.localeCompare(b.peer.name, "zh-CN");
       if (nameCompare !== 0) return nameCompare;

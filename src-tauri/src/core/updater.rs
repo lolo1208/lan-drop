@@ -85,7 +85,7 @@ pub async fn check_and_perform_update(
     let version_url = format!("http://{}:{}/api/update/version", ip, port);
     let download_url = format!("http://{}:{}/api/update/download", ip, port);
 
-    log::info!("正在请求 Master 更新版本信息: {}", version_url);
+    log::debug!("请求 Master 更新版本信息: {}", version_url);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))

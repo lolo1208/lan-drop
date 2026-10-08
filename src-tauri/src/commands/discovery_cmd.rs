@@ -1,6 +1,6 @@
 // 局域网节点探测与同步 Tauri IPC 指令
 use crate::state::AppState;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use crate::discovery;
 
 #[tauri::command]
@@ -17,6 +17,7 @@ pub async fn sync_local_device(
     let mut dev = state.local_device.write().await;
     let real_ip = dev.ip.clone();
     let persistent_id = dev.id.clone();
+    let listening_port = dev.port;
     *dev = device;
     if !persistent_id.is_empty() {
         dev.id = persistent_id;
@@ -24,10 +25,8 @@ pub async fn sync_local_device(
     if !real_ip.is_empty() && real_ip != "127.0.0.1" && real_ip != "0.0.0.0" {
         dev.ip = real_ip;
     }
-    if dev.port == 0 {
-        dev.port = discovery::DEFAULT_PORT;
-    }
-    log::info!("本机配置已同步: ID={}, Name={}, IP={}, Port={}, Avatar={}", dev.id, dev.name, dev.ip, dev.port, dev.avatar_url);
+    // 配置变更尚未重启监听服务，公告端口必须与当前监听端口一致。
+    dev.port = listening_port;
     Ok(dev.clone())
 }
 
@@ -55,6 +54,7 @@ pub async fn probe_peer_ip(
     let default_fallback_port = if local_port > 0 { local_port } else { discovery::DEFAULT_PORT };
     let target_port = port.unwrap_or(default_fallback_port);
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_millis(2500))
         .connect_timeout(std::time::Duration::from_millis(1500))
         .build()
@@ -78,17 +78,9 @@ pub async fn probe_peer_ip(
             return Err("无法添加本机自身".into());
         }
 
-        let _ = app.emit(
-            "peer://discovered",
-            serde_json::json!({
-                "peer": peer,
-                "remoteIp": peer.ip,
-                "timestamp": chrono::Utc::now().timestamp_millis()
-            }),
-        );
+        discovery::register_peer(&app, peer.clone()).await;
         Ok(peer)
     } else {
         Err(format!("无法连接到 {}:{}，请检查对端 IP、端口与防火墙设置", ip, target_port))
     }
 }
-

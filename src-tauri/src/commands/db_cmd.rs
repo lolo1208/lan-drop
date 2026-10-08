@@ -1,6 +1,6 @@
 // 数据库与设置读写 Tauri IPC 指令
 use crate::state::AppState;
-use tauri::State;
+use tauri::{AppHandle, State};
 use crate::AppSettingsPayload;
 use crate::configure_autostart;
 
@@ -25,8 +25,8 @@ pub async fn db_get_all_settings(state: State<'_, AppState>) -> Result<AppSettin
     let global_hotkey = kv_map
         .get("global_hotkey")
         .cloned()
-        .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "Ctrl+Alt+Shift+S".to_string());
+    let screenshot_hotkey = kv_map.get("screenshot_hotkey").cloned().unwrap_or_else(crate::default_screenshot_hotkey);
     let update_url = kv_map.get("update_url").cloned().unwrap_or_default();
     let real_doc_files_dir = dirs::document_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -65,18 +65,24 @@ pub async fn db_get_all_settings(state: State<'_, AppState>) -> Result<AppSettin
         update_url,
         auto_start,
         global_hotkey,
+        screenshot_hotkey,
     })
 }
 
 #[tauri::command]
-pub async fn db_save_all_settings(settings: AppSettingsPayload, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn db_save_all_settings(app: AppHandle, settings: AppSettingsPayload, state: State<'_, AppState>) -> Result<(), String> {
+    let saved_window = state.db.get_kv("global_hotkey").map_err(|e| e.to_string())?.unwrap_or_else(crate::default_global_hotkey);
+    let saved_screenshot = state.db.get_kv("screenshot_hotkey").map_err(|e| e.to_string())?.unwrap_or_else(crate::default_screenshot_hotkey);
+    // 未变更热键时不重新抢占系统组合，避免启动冲突阻止其他设置保存。
+    if saved_window != settings.global_hotkey || saved_screenshot != settings.screenshot_hotkey {
+        crate::system::hotkeys::update_hotkeys(&app, &state.db, &settings.global_hotkey, &settings.screenshot_hotkey)?;
+    }
     let _ = state.db.set_kv("user_name", &settings.name);
     let _ = state.db.set_kv("avatar_url", &settings.avatar_url);
     let _ = state.db.set_kv("port", &settings.port.to_string());
     let _ = state.db.set_kv("download_dir", &settings.download_dir);
     let _ = state.db.set_kv("auto_start", &settings.auto_start.to_string());
     let _ = state.db.set_kv("update_url", &settings.update_url);
-    let _ = state.db.set_kv("global_hotkey", &settings.global_hotkey);
 
     let _ = configure_autostart(settings.auto_start);
 
@@ -85,9 +91,7 @@ pub async fn db_save_all_settings(settings: AppSettingsPayload, state: State<'_,
         let mut dev = state.local_device.write().await;
         dev.name = settings.name;
         dev.avatar_url = settings.avatar_url;
-        if settings.port > 0 {
-            dev.port = settings.port;
-        }
+        // 新端口已持久化，重启后生效；当前公告继续使用实际监听端口。
     }
     {
         let mut dir = state.download_dir.write().await;
@@ -156,4 +160,3 @@ pub fn db_delete_transfer(task_id: String, state: State<'_, AppState>) -> Result
 pub fn db_clear_all_history(state: State<'_, AppState>) -> Result<(), String> {
     state.db.clear_all_history().map_err(|e| e.to_string())
 }
-

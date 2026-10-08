@@ -34,12 +34,12 @@ pub fn toggle_main_window(app: &AppHandle) {
 
         // 如果主窗口当前处于可见、未最小化且处于聚焦前台激活状态
         if is_visible && !is_minimized && is_focused {
-            log::info!("主窗口当前处于前台激活状态，按下快捷键隐藏至系统托盘");
+            log::debug!("主窗口当前处于前台激活状态，按下快捷键隐藏至系统托盘");
             let _ = window.hide();
             let _ = window.set_skip_taskbar(true);
             let _ = window.emit("app://window_hidden_to_tray", true);
         } else {
-            log::info!("主窗口处于后台或未聚焦，按下快捷键呼出并恢复至前台");
+            log::debug!("主窗口处于后台或未聚焦，按下快捷键呼出并恢复至前台");
             let _ = window.show();
             let _ = window.unminimize();
             let _ = window.set_skip_taskbar(false);

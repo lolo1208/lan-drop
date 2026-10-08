@@ -2,8 +2,35 @@
 use crate::state::AppState;
 use tauri::{AppHandle, Emitter, Manager, State};
 use crate::updater;
-use crate::{configure_autostart, parse_shortcut_str, toggle_main_window, send_desktop_notification};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+use crate::{configure_autostart, toggle_main_window, send_desktop_notification};
+use crate::system::hotkeys::{update_hotkeys, HotkeyState};
+
+// 前端统一传入 PNG；解码和系统剪贴板操作在后台线程执行。
+#[tauri::command]
+pub async fn copy_image_to_clipboard(data: Vec<u8>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            let image = image::load_from_memory_with_format(&data, image::ImageFormat::Png)
+                .map_err(|e| format!("读取图片失败：{}", e))?
+                .into_rgba8();
+            let width = image.width() as usize;
+            let height = image.height() as usize;
+            let mut clipboard = arboard::Clipboard::new()
+                .map_err(|e| format!("无法访问系统剪贴板：{}", e))?;
+            clipboard.set_image(arboard::ImageData {
+                width,
+                height,
+                bytes: std::borrow::Cow::Owned(image.into_raw()),
+            }).map_err(|e| format!("复制图片失败：{}", e))
+        }).await.map_err(|e| format!("复制图片任务失败：{}", e))?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = data;
+        Err("当前系统暂不支持复制图片".to_string())
+    }
+}
 
 
 #[tauri::command]
@@ -21,28 +48,24 @@ pub fn set_auto_start(enabled: bool, state: State<'_, AppState>) -> Result<(), S
 
 #[tauri::command]
 pub async fn register_global_hotkey(app: AppHandle, hotkey: String, state: State<'_, AppState>) -> Result<(), String> {
-    let _ = state.db.set_kv("global_hotkey", &hotkey);
+    let screenshot = state.db.get_kv("screenshot_hotkey").map_err(|e| e.to_string())?
+        .unwrap_or_else(crate::default_screenshot_hotkey);
+    update_hotkeys(&app, &state.db, &hotkey, &screenshot)
+}
 
-    let _ = app.global_shortcut().unregister_all();
+#[tauri::command]
+pub async fn register_global_hotkeys(app: AppHandle, hotkey: String, screenshot_hotkey: String, state: State<'_, AppState>) -> Result<(), String> {
+    update_hotkeys(&app, &state.db, &hotkey, &screenshot_hotkey)
+}
 
-    let normalized = parse_shortcut_str(&hotkey);
-    if !normalized.is_empty() {
-        match normalized.parse::<Shortcut>() {
-            Ok(shortcut) => {
-                if let Err(e) = app.global_shortcut().register(shortcut) {
-                    log::warn!("操作系统注册全局快捷键 '{}' 失败: {}", normalized, e);
-                    return Err(format!("系统全局快捷键注册失败，可能被其他程序占用: {}", e));
-                } else {
-                    log::info!("成功注册新系统 OS 级全局唤醒快捷键: {}", normalized);
-                }
-            }
-            Err(e) => {
-                log::warn!("快捷键格式解析失败: {}", e);
-            }
-        }
-    }
+#[tauri::command]
+pub fn get_hotkey_errors(state: State<'_, HotkeyState>) -> Vec<String> {
+    state.startup_errors.lock().map(|mut errors| std::mem::take(&mut *errors)).unwrap_or_default()
+}
 
-    Ok(())
+#[tauri::command]
+pub fn set_hotkey_recording(recording: bool, state: State<'_, HotkeyState>) {
+    state.recording.store(recording, std::sync::atomic::Ordering::Release);
 }
 
 #[tauri::command]
@@ -116,4 +139,3 @@ pub async fn check_for_updates(
 ) -> Result<updater::UpdateCheckResult, String> {
     updater::check_and_perform_update(&app, &master_ip, true).await
 }
-

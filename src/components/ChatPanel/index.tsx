@@ -17,6 +17,7 @@ import { ConfirmModal } from "../ConfirmModal";
 import { ChatHeader } from "./ChatHeader";
 import { ChatInput } from "./ChatInput";
 import { MessageList } from "./MessageList";
+import { ScreenshotDraft } from "../../hooks/useScreenshot";
 
 // prettier-ignore
 const COMMON_EMOJIS = [
@@ -35,17 +36,24 @@ const COMMON_EMOJIS = [
 ];
 
 interface ChatPanelProps {
+  screenshotDrafts: ScreenshotDraft[];
+  onScreenshot: () => Promise<void>;
+  screenshotSupported: boolean;
+  isCapturing: boolean;
+  screenshotHotkey: string;
+  onRemoveScreenshot: (peerId: string, id: string) => void;
+  onToast: (message: string, duration?: number) => void;
   peer: PeerDevice | null;
   messages: ChatMessage[];
   currentUserId?: string;
   currentUserIp?: string;
   currentUserAvatarUrl?: string;
   highlightMessageId?: string | null;
-  onSendMessage: (peer: PeerDevice, text: string) => void;
+  onSendMessage: (peer: PeerDevice, text: string) => Promise<void>;
   onSendFile: (
     peer: PeerDevice,
     file: File | { name: string; size: number; type: string; blob: Blob },
-  ) => void;
+  ) => Promise<void>;
   onAcceptFile: (msg: ChatMessage) => void;
   onResumeFile?: (msg: ChatMessage) => void;
   onDeleteMessage?: (msg: ChatMessage) => void;
@@ -66,6 +74,13 @@ interface ChatPanelProps {
 }
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
+  screenshotDrafts,
+  onScreenshot,
+  screenshotSupported,
+  isCapturing,
+  screenshotHotkey,
+  onRemoveScreenshot,
+  onToast,
   peer,
   messages,
   currentUserId,
@@ -83,6 +98,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onMarkPeerRead,
 }) => {
   const [inputText, setInputText] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const sendingRef = useRef(false);
+  const latestInput = useRef({ peerId: peer?.id, text: inputText });
+  latestInput.current = { peerId: peer?.id, text: inputText };
   const [isDragging, setIsDragging] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [isSelectionMode, setIsSelectionMode] = useState(false);
@@ -297,9 +316,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         }
       }
 
-      onSendFile(targetPeer, file as File);
+      void onSendFile(targetPeer, file as File).catch((error) => onToast(`文件发送失败：${String(error)}`, 6000));
     },
-    [onSendFile],
+    [onSendFile, onToast],
   );
 
   useEffect(() => {
@@ -405,15 +424,34 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     );
   }
 
-  const handleSend = (e?: React.FormEvent) => {
+  const handleSend = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!inputText.trim()) return;
-    onSendMessage(peer, inputText.trim());
-    setInputText("");
-    setShowEmojiPicker(false);
+    if (sendingRef.current || (!inputText.trim() && screenshotDrafts.length === 0)) return;
+    sendingRef.current = true;
+    setIsSending(true);
+    const target = peer;
+    const text = inputText;
+    const pending = [...screenshotDrafts];
+    try {
+      if (text.trim()) {
+        await onSendMessage(target, text.trim());
+        if (latestInput.current.peerId === target.id && latestInput.current.text === text) setInputText("");
+      }
+      for (const draft of pending) {
+        await onSendFile(target, draft.file);
+        onRemoveScreenshot(target.id, draft.id);
+      }
+      setShowEmojiPicker(false);
+    } catch (error) {
+      onToast(`发送失败，未发送的内容已保留：${String(error)}`, 6000);
+    } finally {
+      sendingRef.current = false;
+      setIsSending(false);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -678,6 +716,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         </div>
       ) : (
         <ChatInput
+          screenshotDrafts={screenshotDrafts}
+          onScreenshot={onScreenshot}
+          screenshotSupported={screenshotSupported}
+          isCapturing={isCapturing}
+          screenshotHotkey={screenshotHotkey}
+          isSending={isSending}
+          onRemoveScreenshot={(id) => onRemoveScreenshot(peer.id, id)}
+          onPreviewScreenshot={(draft) => onPreviewMedia("image", draft.previewUrl, draft.file.name)}
           inputText={inputText}
           setInputText={setInputText}
           showEmojiPicker={showEmojiPicker}

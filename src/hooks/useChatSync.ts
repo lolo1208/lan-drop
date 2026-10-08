@@ -391,6 +391,7 @@ export function useChatSync({
   const handleSendMessage = async (targetPeer: PeerDevice, text: string) => {
     const msg = await chatManager.sendTextMessage(targetPeer, text);
     setAllChats((prev) => upsertMessage(prev, msg));
+    if (msg.status === "failed") throw new Error("消息发送失败，请检查对方是否在线");
   };
 
   const handleSendFile = async (
@@ -399,6 +400,7 @@ export function useChatSync({
   ) => {
     const msg = await chatManager.sendFileMessage(targetPeer, file);
     setAllChats((prev) => upsertMessage(prev, msg));
+    if (msg.status === "failed") throw new Error("图片或文件发送失败，请检查对方是否在线");
   };
 
   const handleAcceptFile = async (msg: ChatMessage) => {

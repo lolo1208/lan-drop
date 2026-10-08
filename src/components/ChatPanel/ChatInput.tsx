@@ -4,9 +4,18 @@
  */
 
 import React, { RefObject } from "react";
-import { Smile, Paperclip, Send } from "lucide-react";
+import { Smile, Paperclip, Send, ScanLine, X } from "lucide-react";
+import { ScreenshotDraft } from "../../hooks/useScreenshot";
 
 interface ChatInputProps {
+  screenshotDrafts: ScreenshotDraft[];
+  onScreenshot: () => Promise<void>;
+  screenshotSupported: boolean;
+  isCapturing: boolean;
+  screenshotHotkey: string;
+  isSending: boolean;
+  onRemoveScreenshot: (id: string) => void;
+  onPreviewScreenshot: (draft: ScreenshotDraft) => void;
   inputText: string;
   setInputText: React.Dispatch<React.SetStateAction<string>>;
   showEmojiPicker: boolean;
@@ -24,6 +33,14 @@ interface ChatInputProps {
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
+  screenshotDrafts,
+  onScreenshot,
+  screenshotSupported,
+  isCapturing,
+  screenshotHotkey,
+  isSending,
+  onRemoveScreenshot,
+  onPreviewScreenshot,
   inputText,
   setInputText,
   showEmojiPicker,
@@ -105,6 +122,25 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       )}
 
       <div className="rounded-lg bg-[#252526] border border-[#3c3c3c] focus-within:border-[#0078d4] transition-colors p-1.5">
+        {screenshotDrafts.length > 0 && (
+          <div className="flex gap-2 overflow-x-auto p-2" aria-label="待发送截图">
+            {screenshotDrafts.map((draft) => (
+              <div key={draft.id} className="relative shrink-0">
+                <button type="button" onClick={() => onPreviewScreenshot(draft)}
+                  className="block rounded-md overflow-hidden border border-[#3c3c3c] focus-visible:outline-2 focus-visible:outline-[#38bdf8]"
+                  title={`预览截图（${draft.width} × ${draft.height}）`}>
+                  <img src={draft.previewUrl} alt={`待发送截图，${draft.width} × ${draft.height} 像素`}
+                    className="w-24 h-16 object-contain bg-[#181818]" />
+                </button>
+                <button type="button" onClick={() => onRemoveScreenshot(draft.id)} disabled={isSending}
+                  className="absolute -top-1 -right-1 p-1 rounded-full bg-[#333333] text-white hover:bg-red-600 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-[#38bdf8]"
+                  aria-label="移除这张截图" title="移除截图">
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <textarea
           ref={textareaRef as any}
           rows={3}
@@ -119,6 +155,22 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       <div className="flex items-center justify-between pt-2 px-0.5 mt-0.5 h-8 shrink-0">
         <div className="flex items-center space-x-1 sm:space-x-1.5 h-full">
+          <button type="button" onClick={() => void onScreenshot()}
+            disabled={!screenshotSupported || isCapturing}
+            className="h-7 px-2.5 rounded-lg border border-transparent box-border text-[#9d9d9d] hover:text-[#cccccc] hover:bg-[#2a2d2e] transition-colors flex items-center gap-1.5 text-xs font-medium cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-[#38bdf8]"
+            title={!screenshotSupported ? "截图功能目前仅支持 Windows 桌面客户端" : isCapturing ? "正在截图" : `屏幕截图${screenshotHotkey ? `（${screenshotHotkey}）` : "（全局热键已禁用）"}`}>
+            <ScanLine className="w-3.5 h-3.5 text-[#38bdf8] shrink-0" />
+            <span>{isCapturing ? "截图中" : "截图"}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="h-7 px-2.5 rounded-lg border border-transparent box-border text-[#858585] hover:text-[#cccccc] hover:bg-[#2a2d2e] transition-colors flex items-center gap-1.5 text-xs font-medium cursor-pointer"
+            title="选择并发送文件或多媒体"
+          >
+            <Paperclip className="w-3.5 h-3.5 text-[#38bdf8] shrink-0" />
+            <span>文件</span>
+          </button>
           <button
             type="button"
             onClick={() => setShowEmojiPicker((prev) => !prev)}
@@ -133,25 +185,16 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <span>表情</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="h-7 px-2.5 rounded-lg border border-transparent box-border text-[#858585] hover:text-[#cccccc] hover:bg-[#2a2d2e] transition-colors flex items-center gap-1.5 text-xs font-medium cursor-pointer"
-            title="选择并发送文件或多媒体"
-          >
-            <Paperclip className="w-3.5 h-3.5 text-[#38bdf8] shrink-0" />
-            <span>文件</span>
-          </button>
         </div>
 
         <button
           id="chat-send-msg-btn"
           onClick={() => handleSend()}
-          disabled={!inputText.trim()}
+          disabled={isSending || (!inputText.trim() && screenshotDrafts.length === 0)}
           className="h-7 px-3.5 rounded-lg bg-[#0078d4] hover:bg-[#0284c7] active:bg-[#006cc1] disabled:opacity-40 disabled:hover:bg-[#0078d4] text-white font-medium text-xs flex items-center justify-center gap-1.5 transition-all shadow-xs shrink-0 active:scale-95 cursor-pointer"
           title="发送消息 (Enter)"
         >
-          <span>发送</span>
+          <span>{isSending ? "发送中" : "发送"}</span>
           <Send className="w-3.5 h-3.5" />
         </button>
       </div>

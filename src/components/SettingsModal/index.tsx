@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
-import { ipc } from "../../services/ipc";
+import { ipc, isTauri } from "../../services/ipc";
 import {
   getDefaultDocumentsPath,
   getDefaultMachineName,
@@ -85,17 +85,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
   const [isRecordingHotkey, setIsRecordingHotkey] = useState(false);
+  const [isRecordingScreenshotHotkey, setIsRecordingScreenshotHotkey] = useState(false);
+  const [hotkeyError, setHotkeyError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!isRecordingHotkey) return;
+    if (!isTauri()) return;
+    const recording = isOpen && (isRecordingHotkey || isRecordingScreenshotHotkey);
+    void import("@tauri-apps/api/core").then(({ invoke }) => invoke("set_hotkey_recording", { recording }))
+      .catch((error) => setHotkeyError(`暂停快捷键失败：${String(error)}`));
+    return () => {
+      void import("@tauri-apps/api/core").then(({ invoke }) => invoke("set_hotkey_recording", { recording: false }))
+        .catch(() => {});
+    };
+  }, [isOpen, isRecordingHotkey, isRecordingScreenshotHotkey]);
+
+  useEffect(() => {
+    if (!isOpen || (!isRecordingHotkey && !isRecordingScreenshotHotkey)) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
+      e.stopImmediatePropagation();
 
       if (e.key === "Escape") {
         setIsRecordingHotkey(false);
+        setIsRecordingScreenshotHotkey(false);
         return;
       }
 
@@ -111,18 +127,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         return;
       }
 
+      if (!e.ctrlKey && !e.altKey && !e.metaKey) {
+        setHotkeyError("全局快捷键必须包含 Ctrl、Alt 或 Win 修饰键");
+        return;
+      }
+      if (/^Key[A-Z]$/.test(e.code)) keyName = e.code.slice(3);
+      if (/^Digit[0-9]$/.test(e.code)) keyName = e.code.slice(5);
       parts.push(keyName.length === 1 ? keyName.toUpperCase() : keyName);
       const combined = parts.join("+");
 
-      setFormData((prev) => ({ ...prev, globalHotkey: combined }));
+      setFormData((prev) => ({ ...prev, [isRecordingScreenshotHotkey ? "screenshotHotkey" : "globalHotkey"]: combined }));
+      setHotkeyError(null);
       setIsRecordingHotkey(false);
+      setIsRecordingScreenshotHotkey(false);
     };
 
     window.addEventListener("keydown", handleKeyDown, true);
     return () => {
       window.removeEventListener("keydown", handleKeyDown, true);
     };
-  }, [isRecordingHotkey]);
+  }, [isOpen, isRecordingHotkey, isRecordingScreenshotHotkey]);
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== "system") {
+      setIsRecordingHotkey(false);
+      setIsRecordingScreenshotHotkey(false);
+    }
+  }, [isOpen, activeTab]);
 
   const prevIsOpenRef = useRef(false);
 
@@ -151,31 +182,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       });
       setUpdateStatus(null);
       setPortError(null);
+      setHotkeyError(null);
     }
     prevIsOpenRef.current = isOpen;
   }, [isOpen, defaultTab, config, defaultRealPath, sysInfo]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSaving || isRecordingHotkey || isRecordingScreenshotHotkey) return;
     const portNum = Number(formData.port);
     if (isNaN(portNum) || portNum < 1024 || portNum > 65535) {
       setPortError("端口号必须在 1024 ~ 65535 范围内");
       setTimeout(() => setPortError(null), 3000);
       return;
     }
-    if (formData.globalHotkey !== undefined) {
-      ipc.registerGlobalHotkey(formData.globalHotkey);
-    }
-    onSave({
-      ...formData,
-      port: portNum,
-    });
-    setSavedToast(true);
-    setTimeout(() => {
+    setIsSaving(true);
+    setHotkeyError(null);
+    try {
+      const globalHotkey = formData.globalHotkey ?? "Ctrl+Alt+Shift+S";
+      const screenshotHotkey = formData.screenshotHotkey ?? "Ctrl+Alt+Shift+A";
+      await ipc.registerGlobalHotkeys(globalHotkey, screenshotHotkey);
+      onSave({ ...formData, port: portNum, globalHotkey, screenshotHotkey });
+      setSavedToast(true);
+      setTimeout(() => setSavedToast(false), 1800);
+    } catch (error) {
+      setHotkeyError(String(error));
       setSavedToast(false);
-    }, 1800);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleResetDefaults = () => {
@@ -188,6 +225,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       updateUrl: "",
       autoStart: false,
       port: 57088,
+      globalHotkey: "Ctrl+Alt+Shift+S",
+      screenshotHotkey: "Ctrl+Alt+Shift+A",
     });
     setUpdateStatus(null);
     setPortError(null);
@@ -375,6 +414,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 updateStatus={updateStatus}
                 isRecordingHotkey={isRecordingHotkey}
                 setIsRecordingHotkey={setIsRecordingHotkey}
+                isRecordingScreenshotHotkey={isRecordingScreenshotHotkey}
+                setIsRecordingScreenshotHotkey={setIsRecordingScreenshotHotkey}
+                isSaving={isSaving}
                 handleSelectDirectory={handleSelectDirectory}
                 handleCheckUpdate={handleCheckUpdateNow}
                 sysInfo={sysInfo}
@@ -382,11 +424,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
           </div>
 
+          {hotkeyError && <p role="alert" className="px-5 py-2 text-xs text-rose-300">{hotkeyError}</p>}
           {/* 底部固定操作栏（恢复默认与保存设置） */}
           <div className="px-5 py-3.5 border-t border-[#2b2b2b] bg-[#181818] flex items-center justify-between shrink-0">
             <button
               type="button"
               onClick={handleResetDefaults}
+              disabled={isSaving}
               className="px-3.5 py-2 rounded-xl text-[#cccccc] hover:text-white bg-[#2d2d2d] hover:bg-[#383838] border border-[#3c3c3c] text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -395,6 +439,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             <button
               type="submit"
+              disabled={isSaving || isRecordingHotkey || isRecordingScreenshotHotkey}
               className="px-5 py-2 rounded-xl bg-[#0078d4] hover:bg-[#0284c7] active:bg-[#006cc1] text-white font-medium text-xs flex items-center gap-1.5 shadow-xs transition-all active:scale-95 cursor-pointer"
             >
               {savedToast ? (
@@ -405,7 +450,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               ) : (
                 <>
                   <Save className="w-3.5 h-3.5" />
-                  <span>保存设置</span>
+                  <span>{isSaving ? "保存中" : "保存设置"}</span>
                 </>
               )}
             </button>

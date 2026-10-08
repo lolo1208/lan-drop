@@ -74,9 +74,11 @@ export function useSystemTray({
 
     // 全局组合热键监听呼出/隐藏前台窗口
     const handleGlobalHotkeyPress = async (e: KeyboardEvent) => {
+      // 桌面端由操作系统分发，避免同一次按键同时执行原生和 DOM 回调。
+      if (isTauri() || e.defaultPrevented || e.repeat) return;
       const activeHotkey =
-        configRef.current?.globalHotkey ||
-        ipc.getLocalConfig().globalHotkey ||
+        configRef.current?.globalHotkey ??
+        ipc.getLocalConfig().globalHotkey ??
         "Ctrl+Alt+Shift+S";
       if (!activeHotkey) return;
 

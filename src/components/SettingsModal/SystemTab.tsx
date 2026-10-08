@@ -9,7 +9,6 @@ import {
   ChevronUp,
   Globe,
   HardDrive,
-  Keyboard,
   Power,
   Radio,
   RefreshCw,
@@ -17,6 +16,8 @@ import {
 import React from "react";
 import { getDefaultDocumentsPath } from "../../services/storage";
 import { LocalDeviceConfig } from "../../types";
+import { HotkeyField } from "./HotkeyField";
+import { isTauri } from "../../utils/tauri";
 
 interface SystemTabProps {
   formData: LocalDeviceConfig;
@@ -27,6 +28,9 @@ interface SystemTabProps {
   updateStatus: string | null;
   isRecordingHotkey: boolean;
   setIsRecordingHotkey: React.Dispatch<React.SetStateAction<boolean>>;
+  isRecordingScreenshotHotkey: boolean;
+  setIsRecordingScreenshotHotkey: React.Dispatch<React.SetStateAction<boolean>>;
+  isSaving: boolean;
   handleSelectDirectory: () => Promise<void>;
   handleCheckUpdate: () => Promise<void>;
   sysInfo: any;
@@ -41,6 +45,9 @@ export const SystemTab: React.FC<SystemTabProps> = ({
   updateStatus,
   isRecordingHotkey,
   setIsRecordingHotkey,
+  isRecordingScreenshotHotkey,
+  setIsRecordingScreenshotHotkey,
+  isSaving,
   handleSelectDirectory,
   handleCheckUpdate,
   sysInfo,
@@ -226,76 +233,42 @@ export const SystemTab: React.FC<SystemTabProps> = ({
           )}
         </div>
 
-        {/* 4. 全局呼出快捷键 */}
-        <div className="bg-[#252526]/60 border border-[#333333] rounded-xl p-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <Keyboard className="w-4 h-4 text-[#38bdf8]" />
-              <label className="font-semibold text-[#e0e0e0] text-sm">
-                显示（隐藏）快捷键
-              </label>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() =>
-                  setFormData({ ...formData, globalHotkey: "Ctrl+Alt+Shift+S" })
-                }
-                className="text-[11px] text-[#38bdf8] hover:text-[#7dd3fc] font-medium transition-colors cursor-pointer"
-              >
-                默认 (Ctrl+Alt+Shift+S)
-              </button>
-              {formData.globalHotkey && (
-                <button
-                  type="button"
-                  onClick={() => setFormData({ ...formData, globalHotkey: "" })}
-                  className="text-[11px] text-[#858585] hover:text-rose-400 transition-colors cursor-pointer"
-                >
-                  禁用
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1">
-              <input
-                type="text"
-                readOnly
-                value={
-                  isRecordingHotkey
-                    ? "请在键盘上按下快捷键组合（Esc 取消）..."
-                    : formData.globalHotkey || "未设置 (已禁用)"
-                }
-                onClick={() => setIsRecordingHotkey(true)}
-                className={`w-full px-3.5 py-2 border rounded-xl text-xs font-mono font-semibold transition-all cursor-pointer ${
-                  isRecordingHotkey
-                    ? "bg-[#1a2e3b] border-[#0078d4] text-[#38bdf8] animate-pulse ring-2 ring-[#0078d4]/40"
-                    : formData.globalHotkey
-                      ? "bg-[#1e1e1e] border-[#3c3c3c] text-[#cccccc]"
-                      : "bg-[#1e1e1e] border-[#3c3c3c] text-[#6e7681]"
-                }`}
-              />
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setIsRecordingHotkey(!isRecordingHotkey)}
-              className={`px-3.5 py-2 rounded-xl text-xs font-medium transition-all shrink-0 cursor-pointer ${
-                isRecordingHotkey
-                  ? "bg-rose-600 hover:bg-rose-500 text-white"
-                  : "bg-[#2d2d2d] hover:bg-[#383838] border border-[#3c3c3c] hover:border-[#0078d4] text-[#cccccc] hover:text-white"
-              }`}
-            >
-              <span>{isRecordingHotkey ? "取消" : "更改快捷键"}</span>
-            </button>
-          </div>
-
-          <p className="text-[11px] text-[#858585] mt-1.5 leading-relaxed">
-            激活（呼出）程序，或将程序隐藏至托盘。
-          </p>
-        </div>
+        <HotkeyField
+          label="显示（隐藏）快捷键"
+          value={formData.globalHotkey ?? "Ctrl+Alt+Shift+S"}
+          defaultValue="Ctrl+Alt+Shift+S"
+          description="激活（呼出）程序，或将程序隐藏至托盘。"
+          recording={isRecordingHotkey}
+          disabled={isSaving}
+          onChange={(value) => {
+            setIsRecordingHotkey(false);
+            setIsRecordingScreenshotHotkey(false);
+            setFormData((prev) => ({ ...prev, globalHotkey: value }));
+          }}
+          onRecord={() => {
+            setIsRecordingScreenshotHotkey(false);
+            setIsRecordingHotkey((prev) => !prev);
+          }}
+        />
+        <HotkeyField
+          label="截图快捷键"
+          value={formData.screenshotHotkey ?? "Ctrl+Alt+Shift+A"}
+          defaultValue="Ctrl+Alt+Shift+A"
+          description={isTauri() && /Windows/i.test(navigator.userAgent)
+            ? "在任意应用中框选截图，复制到剪贴板，并在当前聊天中预览后手动发送。"
+            : "截图功能目前仅支持 Windows 桌面客户端。"}
+          recording={isRecordingScreenshotHotkey}
+          disabled={isSaving || !isTauri() || !/Windows/i.test(navigator.userAgent)}
+          onChange={(value) => {
+            setIsRecordingHotkey(false);
+            setIsRecordingScreenshotHotkey(false);
+            setFormData((prev) => ({ ...prev, screenshotHotkey: value }));
+          }}
+          onRecord={() => {
+            setIsRecordingHotkey(false);
+            setIsRecordingScreenshotHotkey((prev) => !prev);
+          }}
+        />
 
         {/* 5. 开机启动 */}
         <div className="bg-[#252526]/60 border border-[#333333] rounded-xl p-4 flex items-center justify-between">

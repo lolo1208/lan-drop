@@ -10,6 +10,7 @@ use tauri::generate_handler;
 pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
     generate_handler![
         system_cmd::set_download_dir,
+        system_cmd::copy_image_to_clipboard,
         discovery_cmd::get_local_device,
         discovery_cmd::sync_local_device,
         discovery_cmd::update_local_device,
@@ -31,6 +32,10 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         system_cmd::set_auto_start,
         fs_cmd::select_directory,
         system_cmd::register_global_hotkey,
+        system_cmd::register_global_hotkeys,
+        system_cmd::get_hotkey_errors,
+        system_cmd::set_hotkey_recording,
+        crate::system::screenshot::start_screenshot,
         db_cmd::db_get_all_settings,
         fs_cmd::save_file_to_disk,
         db_cmd::db_save_all_settings,

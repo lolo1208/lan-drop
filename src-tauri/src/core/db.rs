@@ -7,6 +7,25 @@ pub struct Database {
     conn: Mutex<Connection>,
 }
 
+#[cfg(test)]
+mod hotkey_tests {
+    use super::*;
+
+    #[test]
+    fn hotkey_pair_is_rolled_back_if_second_write_fails() {
+        let db = Database::init(":memory:").unwrap();
+        db.set_kv_batch(&[("global_hotkey", "旧唤醒组合"), ("screenshot_hotkey", "旧截图组合")]).unwrap();
+        db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_screenshot BEFORE INSERT ON kv_store
+             WHEN NEW.key = 'screenshot_hotkey'
+             BEGIN SELECT RAISE(ABORT, '模拟写入失败'); END;"
+        ).unwrap();
+        assert!(db.set_kv_batch(&[("global_hotkey", "新唤醒组合"), ("screenshot_hotkey", "")]).is_err());
+        assert_eq!(db.get_kv("global_hotkey").unwrap().as_deref(), Some("旧唤醒组合"));
+        assert_eq!(db.get_kv("screenshot_hotkey").unwrap().as_deref(), Some("旧截图组合"));
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbChatMessage {
     pub id: String,
@@ -35,6 +54,15 @@ pub struct DbTransfer {
 }
 
 impl Database {
+    /// 在同一事务中保存设置，避免两项热键只保存一半。
+    pub fn set_kv_batch(&self, values: &[(&str, &str)]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for (key, value) in values {
+            tx.execute("INSERT OR REPLACE INTO kv_store (key, value) VALUES (?1, ?2)", params![key, value])?;
+        }
+        tx.commit()
+    }
     pub fn init(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
 

@@ -30,7 +30,7 @@ pub fn configure_autostart(enabled: bool) -> Result<(), String> {
             .map_err(|e| format!("执行 reg add 失败: {}", e))?;
 
         if status.success() {
-            log::info!("已成功添加 Windows 开机启动项");
+            log::debug!("已成功添加 Windows 开机启动项");
             Ok(())
         } else {
             Err("添加 Windows 开机启动项失败".into())
@@ -52,7 +52,7 @@ pub fn configure_autostart(enabled: bool) -> Result<(), String> {
         match status {
             Ok(s) => {
                 if s.success() {
-                    log::info!("已成功清理 Windows 开机启动项");
+                    log::debug!("已成功清理 Windows 开机启动项");
                 }
                 Ok(())
             }
@@ -91,11 +91,11 @@ pub fn configure_autostart(enabled: bool) -> Result<(), String> {
             app_path.to_string_lossy()
         );
         std::fs::write(&plist_path, plist_content).map_err(|e| format!("写入 plist 失败: {}", e))?;
-        log::info!("已成功添加 macOS 开机启动 LaunchAgent: {:?}", plist_path);
+        log::debug!("已成功添加 macOS 开机启动 LaunchAgent: {:?}", plist_path);
     } else {
         if plist_path.exists() {
             let _ = std::fs::remove_file(&plist_path);
-            log::info!("已成功清理 macOS 开机启动 LaunchAgent");
+            log::debug!("已成功清理 macOS 开机启动 LaunchAgent");
         }
     }
     Ok(())
@@ -121,11 +121,11 @@ X-GNOME-Autostart-enabled=true
             app_path.to_string_lossy()
         );
         std::fs::write(&desktop_path, desktop_content).map_err(|e| format!("写入 autostart .desktop 失败: {}", e))?;
-        log::info!("已成功添加 Linux 开机启动 desktop 项: {:?}", desktop_path);
+        log::debug!("已成功添加 Linux 开机启动 desktop 项: {:?}", desktop_path);
     } else {
         if desktop_path.exists() {
             let _ = std::fs::remove_file(&desktop_path);
-            log::info!("已成功清理 Linux 开机启动 desktop 项");
+            log::debug!("已成功清理 Linux 开机启动 desktop 项");
         }
     }
     Ok(())

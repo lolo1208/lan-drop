@@ -148,23 +148,24 @@ export class IPCService {
   }
 
   async registerGlobalHotkey(hotkey: string): Promise<void> {
+    await this.registerGlobalHotkeys(hotkey, this.localConfig.screenshotHotkey ?? "Ctrl+Alt+Shift+A");
     this.localConfig.globalHotkey = hotkey;
     storageService.saveSettings(this.localConfig);
     this.emit("config://updated", this.localConfig);
+  }
 
+  async registerGlobalHotkeys(hotkey: string, screenshotHotkey: string): Promise<void> {
     if (isTauri()) {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("register_global_hotkey", { hotkey });
-      } catch (e) {
-        console.warn("调用 register_global_hotkey 失败:", e);
-      }
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("register_global_hotkeys", { hotkey, screenshotHotkey });
     }
   }
 
   async triggerDiscoveryScan() {
     if (isTauri()) {
       try {
+        // 等待事件监听和持久化 ID 同步完成，避免启动扫描与初始化竞争。
+        await this.init();
         const { invoke } = await import("@tauri-apps/api/core");
         const found = await invoke<any[]>("trigger_discovery_scan");
         if (Array.isArray(found)) {
@@ -428,6 +429,9 @@ export class IPCService {
         }
       } else {
         console.warn("无法获取目标设备 IP 地址，消息发送未完成:", target);
+        msg.status = "failed";
+        await storageService.saveChatMessage(msg);
+        this.emit("chat://updated", msg);
       }
       return msg;
     }
@@ -574,6 +578,50 @@ export class IPCService {
       return this.readMediaDataUrl(filePath, mimeType);
     }
     return "";
+  }
+
+  // 转为 PNG 后复制图片内容，兼容浏览器可解码的各类图片格式。
+  async copyImage(url: string, filePath?: string): Promise<void> {
+    const png = (async () => {
+      const source = isTauri() && filePath
+        ? (await this.readMediaDataUrl(filePath)) || url
+        : url;
+      if (!source) throw new Error("图片不可用，请重新打开预览");
+      const response = await fetch(source);
+      if (!response.ok) throw new Error("读取图片失败");
+      const objectUrl = URL.createObjectURL(await response.blob());
+      try {
+        const image = new Image();
+        image.src = objectUrl;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("无法读取图片像素");
+        context.drawImage(image, 0, 0);
+        return await new Promise<Blob>((resolve, reject) => {
+          canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("图片转换失败")), "image/png");
+        });
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    })();
+    // 后续导入或剪贴板授权失败时，也接收图片转换任务的错误。
+    void png.catch(() => {});
+
+    if (isTauri()) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const data = new Uint8Array(await (await png).arrayBuffer());
+      await invoke("copy_image_to_clipboard", { data: Array.from(data) });
+    } else {
+      // 将转换任务交给 ClipboardItem，保留点击产生的剪贴板授权。
+      if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+        await png;
+        throw new Error("当前浏览器不支持复制图片");
+      }
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    }
   }
 
   // 在操作系统文件管理器中定位并打开指定目录，选中该文件
